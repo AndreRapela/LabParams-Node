@@ -1,0 +1,4 @@
+datacoleta,valor_medido,legislacao,matriz,numerodaamostra,codigodaamostra,parametro
+01/12/2024,0.5,Portaria 888/2021,Água,001,AMO-2024-001,Turbidez
+02/12/2024,1.2,Portaria 888/2021,Água,002,AMO-2024-002,pH
+03/12/2024,0.8,Portaria 888/2021,Água,003,AMO-2024-003,Cloro Residual Livre
