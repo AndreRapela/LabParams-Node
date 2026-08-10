@@ -9,12 +9,23 @@ jest.mock('../config/database', () => ({
   connect: jest.fn(),
   query: jest.fn()
 }));
+jest.mock('../models/AuditLogModel', () => ({ record: jest.fn().mockResolvedValue(null) }));
+jest.mock('../models/AmostraModel', () => ({ applyStatusTransition: jest.fn().mockResolvedValue({}) }));
 
 const pool = require('../config/database');
 
 describe('Teste de Importação - 3 Linhas da Planilha', () => {
   
   const arquivoTeste = path.join(__dirname, 'fixtures/teste_3_linhas.csv');
+  let logSpy;
+
+  beforeAll(() => {
+    logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterAll(() => {
+    logSpy.mockRestore();
+  });
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -208,11 +219,18 @@ describe('Teste de Importação - 3 Linhas da Planilha', () => {
     });
 
     // Mock do client.query para transação
-    mockClient.query.mockImplementation((query) => {
+    mockClient.query.mockImplementation((query, params) => {
+      const normalized = String(query).toLowerCase();
       if (query === 'BEGIN' || query === 'COMMIT') {
         return Promise.resolve();
       }
-      if (query.includes('INSERT INTO resultado_analise')) {
+      if (normalized.includes('select * from amostra')) {
+        return Promise.resolve({
+          rowCount: 1,
+          rows: [{ id: params[0], status_amostra: 'em_analise', local_atual: 'Bancada' }]
+        });
+      }
+      if (normalized.includes('with contexto as')) {
         return Promise.resolve({
           rowCount: 1,
           rows: [{ id: Math.floor(Math.random() * 1000) }]

@@ -5,9 +5,13 @@ jest.mock('../config/database', () => ({
   connect: jest.fn(),
   query: jest.fn()
 }));
+jest.mock('../models/AuditLogModel', () => ({ record: jest.fn().mockResolvedValue(null) }));
+jest.mock('../models/AmostraModel', () => ({ applyStatusTransition: jest.fn().mockResolvedValue({}) }));
+jest.mock('../utils/logger', () => ({ warn: jest.fn() }));
 
 const ImportacaoModel = require('../models/ImportacaoModel');
 const pool = require('../config/database');
+const AmostraModel = require('../models/AmostraModel');
 
 describe('ImportacaoModel', () => {
   
@@ -161,7 +165,7 @@ describe('ImportacaoModel', () => {
       expect(resultado.dados.valor_medido).toBe(1.5);
     });
 
-    test('deve gerar datadapublicacao como timestamp ISO', async () => {
+    test('deve manter datadapublicacao vazia enquanto o resultado está em rascunho', async () => {
       pool.query
         .mockResolvedValueOnce({
           rowCount: 1,
@@ -193,7 +197,7 @@ describe('ImportacaoModel', () => {
       const resultado = await ImportacaoModel.validarLinha(linha, 1);
 
       expect(resultado.sucesso).toBe(true);
-      expect(resultado.dados.datadapublicacao).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+      expect(resultado.dados.datadapublicacao).toBeNull();
     });
 
     test('deve validar valores medidos com muitas casas decimais', async () => {
@@ -302,15 +306,34 @@ describe('ImportacaoModel', () => {
     });
   });
 
+  describe('parseData', () => {
+    test('rejeita formatos ambíguos e datas ISO inexistentes', () => {
+      expect(() => ImportacaoModel.parseData('12-31-2024')).toThrow(/DD\/MM\/AAAA|ISO/);
+      expect(() => ImportacaoModel.parseData('2024-02-30')).toThrow(/inexistente/i);
+    });
+
+    test('aceita data ISO completa com fuso horário', () => {
+      expect(ImportacaoModel.parseData('2024-12-01T10:30:00.000-03:00').toISOString())
+        .toBe('2024-12-01T13:30:00.000Z');
+    });
+  });
+
   describe('inserirLote', () => {
     
     test('deve inserir múltiplos resultados com sucesso', async () => {
+      let nextId = 1;
       const mockClient = {
-        query: jest.fn()
-          .mockResolvedValueOnce({}) // BEGIN
-          .mockResolvedValueOnce({ rows: [{ id: 1 }] }) // INSERT 1
-          .mockResolvedValueOnce({ rows: [{ id: 2 }] }) // INSERT 2
-          .mockResolvedValueOnce({}), // COMMIT
+        query: jest.fn(async (sql, params) => {
+          const normalized = String(sql).toLowerCase();
+          if (normalized.includes('select * from amostra')) {
+            return {
+              rowCount: 1,
+              rows: [{ id: params[0], status_amostra: 'recebida', local_atual: 'Recepção' }],
+            };
+          }
+          if (normalized.includes('with contexto as')) return { rows: [{ id: nextId++ }] };
+          return { rows: [] };
+        }),
         release: jest.fn()
       };
 
@@ -347,20 +370,46 @@ describe('ImportacaoModel', () => {
       expect(resultado.erros).toHaveLength(0);
       expect(mockClient.query).toHaveBeenCalledWith('BEGIN');
       expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
+      expect(mockClient.query).toHaveBeenCalledWith('SAVEPOINT import_row_1');
+      expect(mockClient.query).toHaveBeenCalledWith('RELEASE SAVEPOINT import_row_2');
+      expect(AmostraModel.applyStatusTransition).toHaveBeenCalledTimes(2);
+      const insertionSql = mockClient.query.mock.calls
+        .map(([sql]) => String(sql).toLowerCase())
+        .find((sql) => sql.includes('with contexto as'));
+      expect(insertionSql).toContain('snapshot_analitico');
+      expect(insertionSql).toContain('insert into resultado_versao_snapshot');
+      expect(insertionSql).toContain("'rascunho'");
       expect(mockClient.release).toHaveBeenCalled();
     });
 
-    test('deve fazer rollback em caso de erro', async () => {
+    test('isola falha de uma linha com SAVEPOINT e confirma as demais', async () => {
+      let insertAttempt = 0;
       const mockClient = {
-        query: jest.fn()
-          .mockResolvedValueOnce({}) // BEGIN
-          .mockRejectedValueOnce(new Error('Erro de inserção')), // INSERT falha
+        query: jest.fn(async (sql, params) => {
+          const normalized = String(sql).toLowerCase();
+          if (normalized.includes('select * from amostra')) {
+            return {
+              rowCount: 1,
+              rows: [{ id: params[0], status_amostra: 'em_analise', local_atual: 'Bancada' }],
+            };
+          }
+          if (normalized.includes('with contexto as')) {
+            insertAttempt += 1;
+            if (insertAttempt === 1) {
+              const duplicate = new Error('detalhe interno da restrição');
+              duplicate.code = '23505';
+              throw duplicate;
+            }
+            return { rows: [{ id: 2 }] };
+          }
+          return { rows: [] };
+        }),
         release: jest.fn()
       };
 
       pool.connect.mockResolvedValue(mockClient);
 
-      const resultados = [{
+      const item = {
         valor_medido: 0.5,
         amostra_id: 1,
         parametro_id: 20,
@@ -370,15 +419,50 @@ describe('ImportacaoModel', () => {
         numerodaamostra: '001',
         matriz: 'Água',
         legislacao: 'Portaria 888/2021 (888/2021)'
-      }];
+      };
 
-      const resultado = await ImportacaoModel.inserirLote(resultados);
+      const resultado = await ImportacaoModel.inserirLote([
+        { ...item, _linha_importacao: 42 },
+        { ...item, amostra_id: 2, _linha_importacao: 43 },
+      ]);
 
-      // O método trata o erro e registra no array de erros
-      expect(resultado.inseridos).toBe(0);
+      expect(resultado.inseridos).toBe(1);
       expect(resultado.erros).toHaveLength(1);
-      expect(resultado.erros[0]).toHaveProperty('erro');
+      expect(resultado.erros[0].linha).toBe(42);
+      expect(resultado.erros[0].dados._linha_importacao).toBeUndefined();
+      expect(resultado.erros[0].erro).toContain('Já existe um resultado ativo');
+      expect(mockClient.query).toHaveBeenCalledWith('ROLLBACK TO SAVEPOINT import_row_1');
+      expect(mockClient.query).toHaveBeenCalledWith('RELEASE SAVEPOINT import_row_1');
+      expect(mockClient.query).toHaveBeenCalledWith('COMMIT');
+      expect(mockClient.query).not.toHaveBeenCalledWith('ROLLBACK');
       expect(mockClient.release).toHaveBeenCalled();
+    });
+
+    test('não contabiliza inserção quando o parâmetro saiu do escopo antes da transação', async () => {
+      const mockClient = {
+        query: jest.fn(async (sql, params) => {
+          const normalized = String(sql).toLowerCase();
+          if (normalized.includes('select * from amostra')) {
+            return { rows: [{ id: params[0], status_amostra: 'em_analise' }] };
+          }
+          if (normalized.includes('with contexto as')) return { rows: [] };
+          return { rows: [] };
+        }),
+        release: jest.fn(),
+      };
+      pool.connect.mockResolvedValue(mockClient);
+
+      const resultado = await ImportacaoModel.inserirLote([{
+        valor_medido: 0.5,
+        amostra_id: 1,
+        parametro_id: 20,
+        datacoleta: '2024-12-01T00:00:00.000Z',
+      }]);
+
+      expect(resultado.inseridos).toBe(0);
+      expect(resultado.erros[0].erro).toMatch(/fora do escopo|método inativo/i);
+      expect(mockClient.query).toHaveBeenCalledWith('ROLLBACK TO SAVEPOINT import_row_1');
+      expect(AmostraModel.applyStatusTransition).not.toHaveBeenCalled();
     });
   });
 });

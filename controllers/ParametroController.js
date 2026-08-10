@@ -1,78 +1,53 @@
-// controllers/ParametroController.js
 const ParametroModel = require('../models/ParametroModel');
+const { avaliarConformidade } = require('../utils/conformidade');
 
 class ParametroController {
+  static async findAll(_req, res) {
+    try {
+      const parametros = await ParametroModel.findAll();
+      const data = parametros.map((parametro) => ({
+        ...parametro,
+        status_conformidade: parametro.valor_parametro === null
+          ? 'sem resultado'
+          : avaliarConformidade({
+              ...parametro,
+              valor_medido: parametro.valor_parametro,
+            }),
+      }));
 
-    static async findAll(req, res) {
-        try {
-            const parametros = await ParametroModel.findAll();
-
-            const parametrosComStatus = parametros.map(parametro => {
-                const status = ParametroController.calcularStatusConformidade(parametro);
-                return {
-                    ...parametro,
-                    status_conformidade: status
-                };
-            });
-
-            return res.status(200).json({
-                success: true,
-                data: parametrosComStatus,
-                count: parametrosComStatus.length
-            });
-
-        } catch (error) {
-            console.error('Erro no controller ao buscar parâmetros:', error);
-            return res.status(500).json({
-                success: false,
-                message: 'Erro interno do servidor'
-            });
-        }
+      return res.status(200).json({ success: true, data, count: data.length });
+    } catch (error) {
+      console.error('Erro ao buscar parâmetros:', error.message);
+      return res.status(500).json({ success: false, message: 'Erro interno do servidor' });
     }
+  }
 
-    static async update(req, res) {
-        try {
-            const { id } = req.params;
-            const dados = req.body;
+  static async update(req, res) {
+    try {
+      if (Object.keys(req.body).some((campo) => campo !== 'valor_parametro')) {
+        return res.status(400).json({
+          success: false,
+          message: 'Os limites legais, a matriz, a legislação e o contexto são somente leitura',
+        });
+      }
 
-            const atualizado = await ParametroModel.update(id, dados);
+      const atualizado = await ParametroModel.update(req.params.id, req.body, {
+        actorUserId: req.user?.id,
+        requestId: req.requestId,
+      });
+      if (!atualizado) {
+        return res.status(404).json({ success: false, message: 'Parâmetro não encontrado' });
+      }
 
-            return res.status(200).json({
-                success: true,
-                message: "Parâmetro atualizado com sucesso",
-                data: atualizado
-            });
-
-        } catch (error) {
-            console.error("Erro ao atualizar parâmetro:", error);
-            return res.status(500).json({
-                success: false,
-                message: "Erro ao atualizar parâmetro"
-            });
-        }
+      return res.status(200).json({
+        success: true,
+        message: 'Valor atual do parâmetro atualizado com sucesso',
+        data: atualizado,
+      });
+    } catch (error) {
+      return res.status(400).json({ success: false, message: error.message });
     }
-
-    static calcularStatusConformidade(parametro) {
-        const { valor_parametro, limite_minimo, limite_maximo } = parametro;
-
-        const valor = parseFloat(valor_parametro);
-        const min = parseFloat(limite_minimo);
-        const max = parseFloat(limite_maximo);
-
-        if (isNaN(valor)) return 'dados inválidos - valor';
-        if (isNaN(min)) return 'dados inválidos - mínimo';
-        if (isNaN(max)) return 'dados inválidos - máximo';
-
-        if (valor < min || valor > max) return 'não conforme';
-
-        const faixaTotal = max - min;
-        const valorNormalizado = (valor - min) / faixaTotal;
-
-        if (valorNormalizado > 0.9) return 'crítico';
-        if (valorNormalizado > 0.8) return 'alerta';
-
-        return 'conforme';
-    }
+  }
 }
 
 module.exports = ParametroController;

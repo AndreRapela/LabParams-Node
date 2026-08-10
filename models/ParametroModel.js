@@ -1,119 +1,88 @@
-// models/ParametroModel.js
 const pool = require('../config/database');
+const AuditLogModel = require('./AuditLogModel');
+
+const SELECT_CATALOGO = `
+  select
+    p.id, p.nome, p.unidade_medida, p.valor_parametro,
+    p.limite_minimo, p.limite_maximo, p.categoria,
+    p.tipo_resultado, p.tipo_limite, p.criterio_texto,
+    p.fonte_referencia, p.contexto_legislacao_id,
+    p.legislacao_id, p.matriz_id, p.created_at,
+    m.nome as matriz_nome,
+    l.sigla as legislacao_sigla,
+    l.nome as legislacao_nome,
+    lc.nome as contexto_nome,
+    lc.codigo as contexto_codigo
+  from parametro p
+  join matriz m on p.matriz_id = m.id
+  join legislacao l on p.legislacao_id = l.id
+  join legislacao_contexto lc on p.contexto_legislacao_id = lc.id
+  where p.ativo = true and lc.ativo = true
+`;
 
 class ParametroModel {
-
   static async findAll() {
-    try {
-      const query = `
-        SELECT 
-          p.id,
-          p.nome,
-          p.unidade_medida,
-          p.valor_parametro,
-          p.limite_minimo,
-          p.limite_maximo,
-          p.legislacao_id,
-          p.matriz_id,
-          p.created_at,
-          m.nome AS matriz_nome,
-          l.sigla AS legislacao_sigla,
-          l.nome AS legislacao_nome
-        FROM parametro p
-        LEFT JOIN matriz m ON p.matriz_id = m.id
-        LEFT JOIN legislacao l ON p.legislacao_id = l.id
-        WHERE p.valor_parametro IS NOT NULL
-        ORDER BY p.nome ASC
-      `;
-      const result = await pool.query(query);
-      return result.rows;
-    } catch (error) {
-      console.error('Erro ao buscar parâmetros:', error);
-      throw error;
-    }
+    const result = await pool.query(`${SELECT_CATALOGO}
+      order by l.sigla, lc.ordem, p.categoria, p.nome
+    `);
+    return result.rows;
   }
 
-  static async update(id, dados) {
+  static async update(id, dados, auditContext = {}) {
+    const valor = dados.valor_parametro === null || dados.valor_parametro === ''
+      ? null
+      : Number(dados.valor_parametro);
+    if (valor !== null && (!Number.isFinite(valor) || valor < 0)) {
+      throw new Error('Valor atual inválido');
+    }
+
+    const client = await pool.connect();
     try {
-      const query = `
-        UPDATE parametro
-        SET 
-          nome = $1,
-          unidade_medida = $2,
-          limite_minimo = $3,
-          limite_maximo = $4,
-          legislacao_id = $5,
-          matriz_id = $6,
-          valor_parametro = $7
-        WHERE id = $8
-        RETURNING *;
-      `;
-
-      const values = [
-        dados.nome,
-        dados.unidade_medida,
-        dados.limite_minimo,
-        dados.limite_maximo,
-        dados.legislacao_id,
-        dados.matriz_id,
-        dados.valor_parametro,
-        id
-      ];
-
-      const result = await pool.query(query, values);
+      await client.query('BEGIN');
+      const originalResult = await client.query(
+        'select * from parametro where id = $1 and ativo = true for update',
+        [id]
+      );
+      const original = originalResult.rows[0];
+      if (!original) {
+        await client.query('ROLLBACK');
+        return undefined;
+      }
+      const result = await client.query(`
+        update parametro
+        set valor_parametro = $1
+        where id = $2 and ativo = true
+        returning *
+      `, [valor, id]);
+      await AuditLogModel.record(client, {
+        actorUserId: auditContext.actorUserId,
+        requestId: auditContext.requestId,
+        action: 'UPDATE',
+        entityType: 'parametro',
+        entityId: id,
+        beforeData: original,
+        afterData: result.rows[0],
+      });
+      await client.query('COMMIT');
       return result.rows[0];
-
     } catch (error) {
-      console.error("Erro no model ao atualizar parâmetro:", error);
+      await client.query('ROLLBACK');
       throw error;
+    } finally {
+      client.release();
     }
   }
 
-static async findAllGerenciamento() {
-  const result = await pool.query(`
-    SELECT 
-      p.id,
-      p.nome,
-      p.unidade_medida,
-      p.valor_parametro,
-      p.limite_minimo,
-      p.limite_maximo,
+  static async findAllGerenciamento() {
+    const result = await pool.query(`${SELECT_CATALOGO}
+      order by l.sigla, lc.ordem, p.categoria, p.nome
+    `);
+    return result.rows;
+  }
 
-      p.matriz_id,
-      m.nome AS matriz_nome,
-
-      p.legislacao_id,
-      l.nome AS legislacao_nome,
-      l.sigla AS legislacao_sigla
-    FROM parametro p
-    JOIN matriz m ON m.id = p.matriz_id
-    JOIN legislacao l ON l.id = p.legislacao_id
-    ORDER BY p.nome ASC
-  `);
-
-  return result.rows;
-}
-
-static async updateGerenciamento(id, dados) {
-  const result = await pool.query(`
-    UPDATE parametro
-    SET
-      valor_parametro = $1,
-      matriz_id = $2,
-      legislacao_id = $3
-    WHERE id = $4
-    RETURNING *;
-  `, [
-    dados.valor_parametro,
-    dados.matriz_id,
-    dados.legislacao_id,
-    id
-  ]);
-
-  return result.rows[0];
-}
-
-
+  static async updateGerenciamento(id, dados, auditContext = {}) {
+    return this.update(id, dados, auditContext);
+  }
 }
 
 module.exports = ParametroModel;

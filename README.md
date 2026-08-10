@@ -1,168 +1,131 @@
-# API SysmLab - Backend
+# SYSmLab API
 
-API RESTful para gerenciamento de análises laboratoriais desenvolvida em Node.js com Express e PostgreSQL.
+API REST do SYSmLab, um sistema de gestão laboratorial voltado ao fluxo de clientes e pedidos, recebimento e custódia de amostras, execução e revisão de resultados, emissão de laudos, inventário, equipamentos e gestão da qualidade.
 
-## Tecnologias Utilizadas
+## O que está implementado
 
-* Node.js 21.7.3+
-* Express 4.x
-* PostgreSQL (via pg)
-* Supabase (autenticação e banco de dados)
-* Jest (testes)
-* Multer (upload de arquivos)
-* csv-parser e xlsx (processamento de planilhas)
+- Node.js 20–24, Express 4 e PostgreSQL/Supabase.
+- Autenticação Supabase; JWT validado por JWKS e autorização no servidor para `Gestor`, `Analista` e `Usuário`.
+- Clientes, solicitantes e pedidos de análise com prioridade, prazo e ciclo de vida controlado.
+- Amostras vinculadas a pedido, parâmetros aplicáveis e cadeia de custódia append-only.
+- Catálogo legal versionado por legislação, matriz e contexto, com resultados numéricos, qualitativos e informativos.
+- Métodos analíticos/SOP versionados; um método já referenciado por resultado não pode ser alterado em lugar.
+- Workflow de resultado `rascunho → em_revisao → aprovado/rejeitado → publicado`, histórico imutável e separação obrigatória entre submissor e revisor.
+- Reautenticação por senha para decisões assinadas; a senha e o token nunca são persistidos.
+- Laudos versionados e imutáveis, com snapshot do conteúdo, assinatura de emissão, hash SHA-256, HTML para impressão, QR Code e verificação pública sem exposição dos resultados.
+- Inventário de insumos e lotes, validade, saldo e razão de movimentações imutável.
+- Equipamentos, disponibilidade, calibração, manutenção e histórico de utilização imutável.
+- QMS para não conformidades, desvios, investigação, ações corretivas/preventivas (CAPA) e verificação de eficácia.
+- Importação segura de CSV/XLSX, dashboards baseados apenas em resultados publicados, alertas, auditoria e arquivamento lógico.
+- CORS por allowlist, Helmet, compressão, limites de payload/upload, rate limiting, logs JSON, request ID e health checks.
 
-## Pré-requisitos
+O produto apoia controles relevantes da ISO/IEC 17025, mas **não concede certificação, acreditação nem conformidade automática**. A validação do sistema, dos métodos, dos limites, dos procedimentos e da operação continua sob responsabilidade do laboratório.
 
-* Node.js v18 ou superior
-* PostgreSQL ou acesso ao Supabase
-* Variáveis de ambiente configuradas
+## Instalação local
 
-## Instalação
+Pré-requisitos: Node.js 20 ou superior, npm e um banco PostgreSQL compatível com as migrações.
 
-```bash
-npm install
-```
-
-## Configuração
-
-Crie um arquivo `.env` na raiz do projeto `/api`:
-
-```env
-DATABASE_URL=postgresql://user:password@host:5432/database?sslmode=require
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=postgres
-DB_PASSWORD=sua_senha
-DB_NAME=sysmlab
-SUPABASE_URL=https://seu-projeto.supabase.co
-SUPABASE_KEY=sua_chave_anon_publica
-SUPABASE_SERVICE_ROLE_KEY=sua_chave_service_role
-PORT=3000
-```
-
-## Executando a Aplicação
-
-Desenvolvimento:
-```bash
+```powershell
+npm ci
+Copy-Item .env.example .env
 npm run dev
 ```
 
+A API fica em `http://localhost:3000`. Para confirmar processo e banco:
+
+```powershell
+Invoke-RestMethod http://localhost:3000/health/live
+Invoke-RestMethod http://localhost:3000/health/ready
+```
+
 Produção:
-```bash
+
+```powershell
+npm ci --omit=dev
 npm start
 ```
 
-Servidor disponível em `http://localhost:3000`
+## Banco e migrações
 
-## Testes
+As migrações estão em `supabase/migrations` e o catálogo legal inicial em `supabase/seed.sql`. Faça backup e valide primeiro em homologação.
 
-Executar todos os testes:
-```bash
+```powershell
+$env:SYSMLAB_DB_URL = "postgresql://postgres:SUA_SENHA@db.SEU_PROJECT_REF.supabase.co:5432/postgres"
+npx supabase@latest db push --db-url $env:SYSMLAB_DB_URL --include-seed
+Remove-Item Env:SYSMLAB_DB_URL
+```
+
+Nunca versione `.env`, senha do banco, chave Secret/Service Role ou tokens. O frontend recebe somente a URL e a chave Publishable do Supabase.
+
+## Perfis de acesso
+
+| Recurso | Usuário | Analista | Gestor |
+|---|---:|---:|---:|
+| Dashboards, catálogos, clientes, pedidos, amostras, resultados, laudos, inventário, equipamentos e QMS | leitura | leitura | leitura |
+| Pedidos e amostras | — | criar/editar/operar | criar/editar/operar/arquivar e concluir/cancelar |
+| Resultados | — | lançar, editar rascunho e submeter | lançar, revisar, aprovar, rejeitar, publicar, reabrir e arquivar |
+| Métodos analíticos e clientes | — | — | administrar |
+| Laudos | — | — | emitir nova versão; leitura para os demais perfis |
+| Inventário | — | cadastrar/editar, criar lotes, entradas/saídas | mesmos recursos, ajustes, decisões de status e arquivo |
+| Equipamentos | — | cadastrar/editar, agendar/iniciar evento e registrar uso | mesmos recursos, concluir/cancelar evento, status, calibração e arquivo |
+| QMS | — | abrir/editar ocorrência e executar CAPA | decisões, cancelamentos, encerramento e arquivo |
+| Importação e alertas | — | operar | operar |
+| Usuários, perfis, parâmetros legais e auditoria | — | — | administrar |
+
+Status terminais de pedido (`concluido`, `cancelado`) e amostra (`concluida`, `rejeitada`, `cancelada`) exigem `Gestor`. O frontend apenas reflete essas permissões; a decisão final é sempre da API.
+
+## Fluxo operacional mínimo
+
+1. O Gestor cadastra o cliente e os métodos analíticos versionados.
+2. Analista ou Gestor abre o pedido e recebe a amostra com sua lista de parâmetros.
+3. A cadeia de custódia registra aceite, movimentação, armazenamento e mudanças de estado.
+4. O Analista lança resultados como rascunho, seleciona um método aplicável e os submete.
+5. Um Gestor diferente de quem submeteu aprova ou rejeita mediante reautenticação; a publicação também exige nova confirmação de senha.
+6. Depois que todos os parâmetros esperados estiverem publicados, a amostra pode ser concluída.
+7. O Gestor emite o laudo informando a senha; a partir da segunda versão, também informa o motivo da revisão.
+8. O destinatário valida o hash/QR em `GET /verificar-laudo/:hash`, sem autenticação.
+
+## Endpoints principais
+
+Todos os endpoints de negócio exigem `Authorization: Bearer <token>`, exceto health checks e verificação pública de laudo.
+
+| Grupo | Rotas base |
+|---|---|
+| Saúde | `/health/live`, `/health/ready` |
+| Comercial | `/clientes`, `/pedidos-analise` |
+| Operação laboratorial | `/amostras`, `/resultados-analise`, `/metodos-analiticos`, `/importacao` |
+| Laudos | `/laudos`, `/verificar-laudo/:hash` |
+| Qualidade operacional | `/inventario`, `/equipamentos`, `/qualidade` |
+| Monitoramento | `/dashboard-web`, `/dashboardtv`, `/grafico-parametros`, `/alertas` |
+| Administração | `/usuarios`, `/parametros`, `/gerenciamento-parametros`, `/auditoria` |
+
+O contrato detalhado, com payloads, filtros, workflows e respostas, está em [openapi.yaml](./openapi.yaml).
+
+## Testes e verificações
+
+```powershell
 npm test
+npm audit --omit=dev
+node --check index.js
 ```
 
-Executar com cobertura:
-```bash
-npm run test:coverage
-```
+O pipeline em `.github/workflows/ci.yml` executa testes e auditoria de dependências de produção. Uma aprovação de pipeline não substitui homologação com dados representativos nem UAT do laboratório.
 
-Cobertura atual:
-* Statements: 71.17%
-* Branches: 61.33%
-* Functions: 31.57%
-* Lines: 70.77%
+## Documentação
 
-Total de 26 testes implementados cobrindo modelos, controllers e integração.
+- [Arquitetura](./docs/ARCHITECTURE.md)
+- [Segurança e privacidade](./docs/SECURITY.md)
+- [Operação, deploy e recuperação](./docs/OPERATIONS.md)
+- [Prontidão comercial e limitações](./docs/PRODUCT-READINESS.md)
 
-## Autenticação
+## Limites atuais
 
-A API utiliza autenticação JWT via Supabase. Todas as rotas protegidas requerem o header:
-
-```
-Authorization: Bearer <token>
-```
-
-Para obter o token:
-```bash
-POST /acessos/login
-Content-Type: application/json
-
-{
-  "email": "usuario@exemplo.com",
-  "senha": "senha123"
-}
-```
-
-## Endpoints Principais
-
-### Amostras
-* `GET /amostra` - Listar amostras
-* `POST /amostra` - Criar amostra
-* `PUT /amostra/:id` - Atualizar amostra
-* `DELETE /amostra/:id` - Deletar amostra
-
-### Parâmetros
-* `GET /parametro` - Listar parâmetros
-* `POST /parametro` - Criar parâmetro
-* `PUT /parametro/:id` - Atualizar parâmetro
-* `DELETE /parametro/:id` - Deletar parâmetro
-
-### Resultados de Análise
-* `GET /resultado-analise` - Listar resultados
-* `POST /resultado-analise` - Criar resultado
-* `PUT /resultado-analise/:id` - Atualizar resultado
-* `DELETE /resultado-analise/:id` - Deletar resultado
-
-### Importação
-* `POST /importacao/resultado-analise` - Importar planilha (CSV/XLSX)
-* `GET /importacao/template` - Baixar template de importação
-
-### Dashboard e Gráficos
-* `GET /dashboard-web/resumo` - Resumo do dashboard
-* `GET /grafico-parametro` - Dados para gráficos
-
-### Alertas
-* `GET /alerta-naoconformidade` - Listar alertas de não conformidade
-
-## Importação de Planilhas
-
-A API suporta importação de resultados de análises através de arquivos CSV, XLS e XLSX com limite de 10MB.
-
-```bash
-POST /importacao/resultado-analise
-Content-Type: multipart/form-data
-Authorization: Bearer <token>
-
-Body: arquivo
-```
-
-Validações realizadas:
-* Formato do arquivo (.csv, .xlsx, .xls)
-* Tamanho máximo (10MB)
-* Campos obrigatórios presentes
-* Tipos de dados corretos
-* Datas válidas
-* Referências existentes (amostra, parâmetro, matriz, legislação)
-
-## Segurança
-
-* Autenticação JWT
-* Queries parametrizadas (proteção contra SQL Injection)
-* Sanitização de inputs
-* CORS configurado
-* SSL/TLS obrigatório em produção
-
-## Deploy
-
-Para deploy na Vercel:
-```bash
-npm i -g vercel
-vercel
-```
-
-Configure as variáveis de ambiente no painel da Vercel.
+- Uma instalação atende um laboratório; não há isolamento multi-tenant.
+- O laudo é entregue como HTML imprimível. Geração de PDF assinável, armazenamento de arquivo e certificado digital ICP-Brasil não estão implementados.
+- Não há portal do cliente, orçamento/faturamento, agenda de bancada, integração automática com instrumentos, webhooks, SSO empresarial ou MFA obrigatório pela aplicação.
+- Inventário, equipamentos e QMS possuem controles operacionais essenciais, mas ainda não cobrem compras, qualificação completa de fornecedores, cartas de controle, ensaio de proficiência ou gestão documental.
+- Catálogo legal e regras de conformidade precisam de validação técnica e atualização controlada pelo laboratório antes do uso decisório.
 
 ## Licença
 
-Propriedade de CAERN - Companhia de Águas e Esgotos do Rio Grande do Norte.
+Código proprietário (`UNLICENSED`). Antes de distribuir ou vender, formalize titularidade, licença comercial, termos de uso, política de privacidade, tratamento de dados, suporte e SLA.

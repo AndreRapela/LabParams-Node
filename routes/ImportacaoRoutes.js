@@ -5,7 +5,9 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const { randomUUID } = require('crypto');
 const ImportacaoController = require('../controllers/ImportacaoController');
+const roleFromTable = require('../middleware/RoleFromTable');
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -32,12 +34,8 @@ const storage = multer.diskStorage({
     cb(null, uploadDir);
   },
   filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const safeName = path
-      .basename(file.originalname)
-      .normalize('NFKD')
-      .replace(/[^a-zA-Z0-9._-]/g, '_');
-    cb(null, `${uniqueSuffix}-${safeName}`);
+    const extension = path.extname(path.basename(file.originalname)).toLowerCase();
+    cb(null, `${randomUUID()}${extension}`);
   }
 });
 
@@ -48,13 +46,12 @@ const upload = multer({
   },
   fileFilter: function (req, file, cb) {
     // Validação 1: Extensão do arquivo
-    const extensoesPermitidas = ['.csv', '.xls', '.xlsx'];
+    const extensoesPermitidas = ['.csv', '.xlsx'];
     const ext = path.extname(file.originalname).toLowerCase();
     
     // Validação 2: MIME type
     const mimeTypesPermitidos = [
       'text/csv',
-      'application/vnd.ms-excel',
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       'application/csv',
       'text/x-csv',
@@ -66,7 +63,7 @@ const upload = multer({
     
     // Verifica extensão (prioridade na validação)
     if (!extensoesPermitidas.includes(ext)) {
-      return cb(new Error('Apenas arquivos CSV, XLS e XLSX são permitidos'));
+      return cb(new Error('Apenas arquivos CSV e XLSX são permitidos'));
     }
     
     // Verifica MIME type apenas se não for octet-stream genérico
@@ -74,14 +71,19 @@ const upload = multer({
     if (file.mimetype && 
         file.mimetype !== 'application/octet-stream' && 
         !mimeTypesPermitidos.includes(file.mimetype)) {
-      return cb(new Error(`Tipo de arquivo inválido: ${file.mimetype}. Apenas CSV, XLS e XLSX são permitidos`));
+      return cb(new Error(`Tipo de arquivo inválido: ${file.mimetype}. Apenas CSV e XLSX são permitidos`));
     }
     
     cb(null, true);
   }
 });
 
-router.post('/resultado-analise', upload.single('arquivo'), ImportacaoController.importarResultadosAnalise);
+router.post(
+  '/resultado-analise',
+  roleFromTable('Gestor', 'Analista'),
+  upload.single('arquivo'),
+  ImportacaoController.importarResultadosAnalise
+);
 
 /**
  * @route GET /importacao/template
@@ -89,7 +91,11 @@ router.post('/resultado-analise', upload.single('arquivo'), ImportacaoController
  * @query formato - 'csv' ou 'xlsx' (padrão: csv)
  * @access Protegido (requer autenticação)
  */
-router.get('/template', ImportacaoController.baixarTemplate);
+router.get(
+  '/template',
+  roleFromTable('Gestor', 'Analista', 'Usuário'),
+  ImportacaoController.baixarTemplate
+);
 
 router.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {

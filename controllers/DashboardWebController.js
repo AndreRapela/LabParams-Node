@@ -1,17 +1,19 @@
 const DashboardWebModel = require('../models/DashboardWebModel');
 const pool = require('../config/database');
+const { avaliarStatusOperacional } = require('../utils/conformidade');
 
 const VALID_STATUSES = new Set([
   'conforme',
   'alerta',
   'critico',
   'nao-conforme',
+  'informativo',
 ]);
 
 function parseNumber(value) {
-  if (value === null || value === undefined || value === '') return 0;
+  if (value === null || value === undefined || value === '') return null;
   const parsed = Number(String(value).trim().replace(',', '.'));
-  return Number.isFinite(parsed) ? parsed : 0;
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function parsePositiveId(value) {
@@ -20,35 +22,32 @@ function parsePositiveId(value) {
 }
 
 function calculatePercentage(value, minimum, maximum) {
-  if (minimum === maximum) return 0;
+  if (value === null) return 0;
+  if (minimum === null && maximum !== null && maximum > 0) {
+    return Math.round(Math.min(100, Math.max(0, (value / maximum) * 100)) * 10) / 10;
+  }
+  if (minimum === null || maximum === null || minimum === maximum) return 0;
   const percentage = ((value - minimum) / (maximum - minimum)) * 100;
   return Math.round(Math.min(100, Math.max(0, percentage)) * 10) / 10;
 }
 
-function determineStatus(value, minimum, maximum, percentage) {
-  if (value < minimum || value > maximum) return 'nao-conforme';
-  if (percentage >= 30 && percentage <= 70) return 'conforme';
-  if (
-    (percentage >= 20 && percentage < 30) ||
-    (percentage > 70 && percentage <= 80)
-  ) {
-    return 'alerta';
-  }
-  return 'critico';
-}
-
 function formatDashboardItem(item, index) {
-  const value = parseNumber(item.valor_parametro);
+  const numericValue = parseNumber(item.valor_parametro);
   const minimum = parseNumber(item.limite_minimo);
   const maximum = parseNumber(item.limite_maximo);
-  const percentage = calculatePercentage(value, minimum, maximum);
+  const percentage = calculatePercentage(numericValue, minimum, maximum);
+  const status = avaliarStatusOperacional({
+    ...item,
+    valor_medido: numericValue,
+  });
 
   return {
     id: item.id || index + 1,
     parametro_id: item.parametro_id,
     parameter_name: item.nome || `Parâmetro ${index + 1}`,
-    current_value: value,
-    valor_parametro: value,
+    current_value: item.valor_qualitativo || numericValue,
+    valor_parametro: numericValue,
+    valor_qualitativo: item.valor_qualitativo,
     min_limit: minimum,
     max_limit: maximum,
     limite_minimo: minimum,
@@ -56,7 +55,9 @@ function formatDashboardItem(item, index) {
     unit: item.unidade_medida || '',
     unidade_medida: item.unidade_medida || '',
     porcentagem: percentage,
-    status: determineStatus(value, minimum, maximum, percentage),
+    tipo_limite: item.tipo_limite,
+    criterio_legal: item.criterio_legal,
+    status,
     last_update: item.created_at || new Date().toISOString(),
     matriz_nome: item.matriz_nome || '',
     legislacao_sigla: item.legislacao_sigla || '',
@@ -69,10 +70,10 @@ function formatDashboardItem(item, index) {
 function buildStatistics(data) {
   const counts = data.reduce(
     (summary, item) => {
-      summary[item.status] += 1;
+      if (Object.hasOwn(summary, item.status)) summary[item.status] += 1;
       return summary;
     },
-    { conforme: 0, alerta: 0, critico: 0, 'nao-conforme': 0 }
+    { conforme: 0, alerta: 0, critico: 0, 'nao-conforme': 0, informativo: 0 }
   );
 
   return {
@@ -80,6 +81,7 @@ function buildStatistics(data) {
     alert_count: counts.alerta,
     critical_count: counts.critico,
     non_compliant_count: counts['nao-conforme'],
+    informative_count: counts.informativo,
     total_parameters: data.length,
   };
 }

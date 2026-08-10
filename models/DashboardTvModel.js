@@ -1,38 +1,45 @@
 const pool = require('../config/database');
 
 class DashboardTvModel {
-
-  static async getDashboardData({ parametro_id }) {
-    const params = [];
-    let where = 'WHERE 1=1';
-
-    if (parametro_id?.length) {
-      where += ` AND p.id = ANY($1)`;
-      params.push(parametro_id);
+  static async getDashboardData({ parametro_id: parameterIds } = {}) {
+    const values = [];
+    const clauses = [
+      'ra.deleted_at is null',
+      "ra.status_resultado = 'publicado'",
+      'a.deleted_at is null',
+    ];
+    if (parameterIds?.length) {
+      values.push(parameterIds);
+      clauses.push(`ra.parametro_id = any($${values.length})`);
     }
 
-    const query = `
-      SELECT
+    const result = await pool.query(`
+      select
         ra.id,
-        ra.valor_medido AS valor_parametro,
+        ra.valor_medido as valor_parametro,
+        ra.valor_qualitativo,
         ra.created_at,
-        p.id AS parametro_id,
-        p.nome,
-        p.unidade_medida,
-        p.limite_minimo,
-        p.limite_maximo,
-        m.nome AS matriz_nome,
-        l.sigla AS legislacao_sigla,
-        l.nome AS legislacao_nome
-      FROM resultado_analise ra
-      JOIN parametro p ON p.id = ra.parametro_id
-      JOIN matriz m ON m.id = p.matriz_id
-      JOIN legislacao l ON l.id = p.legislacao_id
-      ${where}
-      ORDER BY ra.created_at DESC
-    `;
-
-    const result = await pool.query(query, params);
+        ra.parametro_id,
+        coalesce(
+          ra.snapshot_analitico->'parametro'->>'nome',
+          ra.parametro_nome_aplicado
+        ) as nome,
+        coalesce(
+          ra.snapshot_analitico->'parametro'->>'unidade_medida',
+          ra.unidade_medida_aplicada
+        ) as unidade_medida,
+        ra.limite_minimo_aplicado as limite_minimo,
+        ra.limite_maximo_aplicado as limite_maximo,
+        ra.tipo_limite_aplicado as tipo_limite,
+        ra.criterio_legal_aplicado as criterio_legal,
+        ra.snapshot_analitico->'matriz'->>'nome' as matriz_nome,
+        ra.snapshot_analitico->'referencia_legal'->>'legislacao_sigla' as legislacao_sigla,
+        ra.snapshot_analitico->'referencia_legal'->>'legislacao_nome' as legislacao_nome
+      from resultado_analise ra
+      join amostra a on a.id = ra.amostra_id
+      where ${clauses.join(' and ')}
+      order by ra.created_at desc
+    `, values);
     return result.rows;
   }
 }

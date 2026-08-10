@@ -1,77 +1,44 @@
-// models/AlertasModel.js
 const pool = require('../config/database');
+const { avaliarConformidade } = require('../utils/conformidade');
 
 class AlertasModel {
-
   static async getAlertas() {
-    try {
-      const query = `
-        SELECT 
-          ra.id,
-          ra.valor_medido,
-          ra.created_at as data_alerta,
-          p.nome as parametro_nome,
-          p.unidade_medida,
-          p.limite_minimo,
-          p.limite_maximo,
-          m.nome as matriz_nome
-        FROM resultado_analise ra
-        INNER JOIN parametro p ON ra.parametro_id = p.id
-        INNER JOIN amostra a ON ra.amostra_id = a.id
-        INNER JOIN matriz m ON a.matriz_id = m.id
-        WHERE p.limite_minimo IS NOT NULL OR p.limite_maximo IS NOT NULL
-        ORDER BY ra.created_at DESC
-      `;
-      
-      const result = await pool.query(query);
-      
-      const relatorio = result.rows.map(item => {
-        const valor = parseFloat(item.valor_medido);
-        const min = item.limite_minimo ? parseFloat(item.limite_minimo) : -Infinity;
-        const max = item.limite_maximo ? parseFloat(item.limite_maximo) : Infinity;
-        
-        let status = 'CONFORME';
-        let mensagemLimite = '';
+    const result = await pool.query(`
+      select
+        ra.id, ra.valor_medido, ra.valor_qualitativo, ra.created_at as data_alerta,
+        p.nome as parametro_nome, p.unidade_medida,
+        coalesce(ra.limite_minimo_aplicado, p.limite_minimo) as limite_minimo,
+        coalesce(ra.limite_maximo_aplicado, p.limite_maximo) as limite_maximo,
+        coalesce(ra.tipo_limite_aplicado, p.tipo_limite) as tipo_limite,
+        coalesce(ra.criterio_legal_aplicado, p.criterio_texto) as criterio_legal,
+        m.nome as matriz_nome,
+        lc.nome as contexto_nome
+      from resultado_analise ra
+      join parametro p on ra.parametro_id = p.id
+      join amostra a on ra.amostra_id = a.id
+      join matriz m on a.matriz_id = m.id
+      join legislacao_contexto lc on p.contexto_legislacao_id = lc.id
+      where ra.deleted_at is null
+        and ra.status_resultado = 'publicado'
+        and a.deleted_at is null
+      order by ra.created_at desc
+    `);
 
-        if (valor >= min && valor <= max) {
-            const margemAlerta = 0.10;
-
-            if ((item.limite_maximo && valor >= max * (1 - margemAlerta)) || 
-                (item.limite_minimo && valor <= min * (1 + margemAlerta))) {
-                status = 'ALERTA';
-                mensagemLimite = item.limite_maximo && valor >= max * 0.9 ? `(Próx. Max: ${max})` : `(Próx. Min: ${min})`;
-            } else {
-                status = 'CONFORME';
-            }
-        }
-        else {
-            const margemCritica = 0.20;
-
-            let isCritico = false;
-            
-            if (item.limite_maximo && valor > max) {
-                if (valor > max * (1 + margemCritica)) isCritico = true;
-                mensagemLimite = `(Max: ${max})`;
-            }
-            
-            if (item.limite_minimo && valor < min) {
-                if (valor < min * (1 - margemCritica)) isCritico = true;
-                mensagemLimite = `(Min: ${min})`;
-            }
-
-            status = isCritico ? 'CRÍTICO' : 'NÃO CONFORME';
-        }
-
-        return { ...item, status, mensagem_limite: mensagemLimite };
+    return result.rows
+      .map((item) => {
+        const conformidade = avaliarConformidade(item);
+        if (conformidade === 'conforme' || conformidade === 'informativo') return null;
+        const limite = item.criterio_legal || [
+          item.limite_minimo !== null ? `mín. ${item.limite_minimo}` : null,
+          item.limite_maximo !== null ? `máx. ${item.limite_maximo}` : null,
+        ].filter(Boolean).join(' · ');
+        return {
+          ...item,
+          status: 'NÃO CONFORME',
+          mensagem_limite: limite ? `(${limite})` : '',
+        };
       })
-      .filter(item => item.status !== 'CONFORME');
-
-      return relatorio;
-
-    } catch (error) {
-      console.error('Erro no AlertasModel:', error);
-      throw error;
-    }
+      .filter(Boolean);
   }
 }
 

@@ -5,6 +5,8 @@ jest.mock('../config/database', () => ({
   query: jest.fn(),
   connect: jest.fn()
 }));
+jest.mock('../models/AuditLogModel', () => ({ record: jest.fn().mockResolvedValue(null) }));
+jest.mock('../models/AmostraModel', () => ({ applyStatusTransition: jest.fn().mockResolvedValue({}) }));
 
 describe('Teste de fluxo completo de importacao', () => {
   
@@ -172,18 +174,23 @@ describe('Teste de fluxo completo de importacao', () => {
   });
 
   test('inserirLote - deve inserir multiplos registros com sucesso', async () => {
+    let nextId = 1;
     const mockClient = {
-      query: jest.fn(),
+      query: jest.fn(async (sql, params) => {
+        const normalized = String(sql).toLowerCase();
+        if (normalized.includes('select * from amostra')) {
+          return {
+            rowCount: 1,
+            rows: [{ id: params[0], status_amostra: 'em_analise', local_atual: 'Bancada' }],
+          };
+        }
+        if (normalized.includes('with contexto as')) return { rows: [{ id: nextId++ }] };
+        return { rows: [] };
+      }),
       release: jest.fn()
     };
 
     pool.connect = jest.fn().mockResolvedValue(mockClient);
-
-    mockClient.query
-      .mockResolvedValueOnce({})
-      .mockResolvedValueOnce({ rows: [{ id: 1 }] })
-      .mockResolvedValueOnce({ rows: [{ id: 2 }] })
-      .mockResolvedValueOnce({});
 
     const dadosValidos = [
       {

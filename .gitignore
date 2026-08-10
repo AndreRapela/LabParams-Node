@@ -2,7 +2,6 @@
 # DEPENDÊNCIAS
 # ====================================
 node_modules/
-package-lock.json
 yarn.lock
 pnpm-lock.yaml
 
@@ -17,10 +16,8 @@ pnpm-lock.yaml
 .env.test
 .env.production
 
-# Configurações sensíveis
-config/database.js
-config/supabase.js
-config/supabaseAdmin.js
+# Sobrescritas locais de configuração; os módulos que leem env são versionados.
+config/*.local.js
 
 # ====================================
 # LOGS E DEBUG
@@ -99,6 +96,10 @@ Desktop.ini
 *.cert
 *.crt
 
+# CA pública oficial necessária para validar o TLS do Supabase no deploy.
+!config/certs/
+!config/certs/supabase-prod-ca-2021.crt
+
 # ====================================
 # BACKUP E DADOS SENSÍVEIS
 # ====================================
@@ -106,3 +107,8 @@ Desktop.ini
 *.bak
 *.sql
 *.dump
+
+# O esquema e o catálogo do Supabase fazem parte do código-fonte.
+!supabase/migrations/
+!supabase/migrations/*.sql
+!supabase/seed.sql

@@ -1,0 +1,13 @@
+const express=require('express');
+const Controller=require('../controllers/LaudoController');
+const roleFromTable=require('../middleware/RoleFromTable');
+const {sharedSignatureRateLimiter}=require('../middleware/UserRouteRateLimit');
+const router=express.Router();
+const read=roleFromTable('Gestor','Analista','Usuário');
+const manage=roleFromTable('Gestor');
+router.get('/',read,Controller.findAll);
+router.post('/amostras/:amostraId/versoes',manage,sharedSignatureRateLimiter,Controller.generate);
+router.get('/amostras/:amostraId',read,Controller.findBySample);
+router.get('/:id/html',read,Controller.html);
+router.get('/:id',read,Controller.findById);
+module.exports=router;

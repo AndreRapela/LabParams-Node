@@ -1,0 +1,16 @@
+const express=require('express');
+const Controller=require('../controllers/PedidoAnaliseController');
+const roleFromTable=require('../middleware/RoleFromTable');
+const terminalStatusRole=require('../middleware/TerminalStatusRole');
+const router=express.Router();
+const read=roleFromTable('Gestor','Analista','Usuário');
+const operation=roleFromTable('Gestor','Analista');
+const manage=roleFromTable('Gestor');
+const terminalOrder=terminalStatusRole({field:'status',terminalStatuses:['concluido','cancelado']});
+router.get('/',read,Controller.findAll);
+router.post('/',operation,Controller.create);
+router.patch('/:id/status',operation,terminalOrder,Controller.status);
+router.get('/:id',read,Controller.findById);
+router.put('/:id',operation,Controller.update);
+router.delete('/:id',manage,Controller.archive);
+module.exports=router;

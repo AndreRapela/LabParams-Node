@@ -1,10 +1,12 @@
 // controllers/ImportacaoController.js
 const ImportacaoModel = require('../models/ImportacaoModel');
-const XLSX = require('xlsx');
+const readXlsxFile = require('read-excel-file/node');
+const writeXlsxFile = require('write-excel-file/node');
 const csv = require('csv-parser');
 const fs = require('fs');
 const path = require('path');
 const VALIDATION_BATCH_SIZE = 10;
+const MAX_IMPORT_ROWS = 5_000;
 
 class ImportacaoController {
 
@@ -16,18 +18,18 @@ class ImportacaoController {
         return res.status(400).json({
           success: false,
           message: 'Nenhum arquivo foi enviado',
-          error: 'É necessário enviar um arquivo CSV, XLS ou XLSX'
+          error: 'É necessário enviar um arquivo CSV ou XLSX'
         });
       }
 
       arquivoPath = req.file.path;
       const extensao = path.extname(req.file.originalname).toLowerCase();
 
-      if (!['.csv', '.xls', '.xlsx'].includes(extensao)) {
+      if (!['.csv', '.xlsx'].includes(extensao)) {
         return res.status(400).json({
           success: false,
           message: 'Formato de arquivo não suportado',
-          error: 'Apenas arquivos CSV, XLS e XLSX são aceitos'
+          error: 'Apenas arquivos CSV e XLSX são aceitos'
         });
       }
 
@@ -44,6 +46,14 @@ class ImportacaoController {
           success: false,
           message: 'Arquivo vazio',
           error: 'O arquivo não contém dados para importar'
+        });
+      }
+
+      if (linhas.length > MAX_IMPORT_ROWS) {
+        return res.status(400).json({
+          success: false,
+          message: 'Arquivo excede o limite de linhas',
+          error: `Envie no máximo ${MAX_IMPORT_ROWS.toLocaleString('pt-BR')} resultados por importação`,
         });
       }
 
@@ -65,7 +75,7 @@ class ImportacaoController {
           success: false,
           message: 'Estrutura do arquivo incorreta',
           error: `Campos obrigatórios faltando: ${camposFaltando.join(', ')}`,
-          exemplo: 'Cabeçalho esperado: datacoleta, valor_medido, legislacao, matriz, numerodaamostra, codigodaamostra, parametro'
+          exemplo: 'Cabeçalho esperado: datacoleta, valor_medido, legislacao, contexto, matriz, numerodaamostra, codigodaamostra, parametro'
         });
       }
 
@@ -83,7 +93,10 @@ class ImportacaoController {
         for (let index = 0; index < results.length; index++) {
           const result = results[index];
           if (result.sucesso) {
-            dadosValidos.push(result.dados);
+            dadosValidos.push({
+              ...result.dados,
+              _linha_importacao: start + index + 2,
+            });
           } else {
             errosValidacao.push({
               linha: start + index + 2,
@@ -97,7 +110,10 @@ class ImportacaoController {
       let resultadoInsercao = { inseridos: 0, erros: [] };
 
       if (dadosValidos.length > 0) {
-        resultadoInsercao = await ImportacaoModel.inserirLote(dadosValidos);
+        resultadoInsercao = await ImportacaoModel.inserirLote(dadosValidos, {
+          actorUserId: req.user?.id,
+          requestId: req.requestId,
+        });
       }
 
       const todosErros = [
@@ -119,13 +135,15 @@ class ImportacaoController {
         erros: todosErros.length > 0 ? todosErros : undefined
       };
 
-      // Se nenhum registro foi inserido, considerar falha parcial
+      let statusCode = 200;
       if (resultadoInsercao.inseridos === 0) {
         resposta.success = false;
         resposta.message = 'Nenhum registro foi inserido no banco de dados';
+        statusCode = 422;
+      } else if (todosErros.length > 0) {
+        resposta.message = 'Importação concluída parcialmente';
+        statusCode = 207;
       }
-
-      const statusCode = resposta.success ? 200 : 207; // 207 = Multi-Status
 
       return res.status(statusCode).json(resposta);
 
@@ -168,30 +186,38 @@ class ImportacaoController {
 
   static async lerExcel(caminhoArquivo) {
     try {
-      const workbook = XLSX.readFile(caminhoArquivo);
-      const sheetName = workbook.SheetNames[0]; // Primeira aba
-      if (!sheetName) throw new Error('A planilha não possui abas');
-      const sheet = workbook.Sheets[sheetName];
-      
-      // Converte para JSON
-      const dados = XLSX.utils.sheet_to_json(sheet, {
-        raw: false, // Converte datas e números para string
-        defval: '', // Valor padrão para células vazias
-        blankrows: false // Ignora linhas vazias
-      });
+      const linhas = await readXlsxFile(caminhoArquivo);
+      if (!linhas.length) return [];
 
-      // Normaliza chaves para lowercase
-      return dados.map(linha => {
-        const linhaNormalizada = {};
-        Object.keys(linha).forEach(chave => {
-          linhaNormalizada[chave.trim().toLowerCase()] = linha[chave];
-        });
-        return linhaNormalizada;
-      });
+      const cabecalhos = linhas[0].map((valor) =>
+        String(valor ?? '').trim().toLowerCase()
+      );
+      if (cabecalhos.every((valor) => !valor)) {
+        throw new Error('A primeira linha deve conter os cabeçalhos');
+      }
+
+      return linhas.slice(1)
+        .filter((linha) => linha.some((valor) => valor !== null && valor !== ''))
+        .map((linha) => Object.fromEntries(
+          cabecalhos.map((cabecalho, indice) => [
+            cabecalho,
+            ImportacaoController.normalizarCelulaExcel(linha[indice]),
+          ])
+        ));
 
     } catch (error) {
       throw new Error(`Erro ao ler arquivo Excel: ${error.message}`);
     }
+  }
+
+  static normalizarCelulaExcel(valor) {
+    if (valor === null || valor === undefined) return '';
+    if (valor instanceof Date) {
+      const dia = String(valor.getUTCDate()).padStart(2, '0');
+      const mes = String(valor.getUTCMonth() + 1).padStart(2, '0');
+      return `${dia}/${mes}/${valor.getUTCFullYear()}`;
+    }
+    return String(valor).trim();
   }
 
   static async baixarTemplate(req, res) {
@@ -202,6 +228,7 @@ class ImportacaoController {
         'datacoleta',
         'valor_medido',
         'legislacao',
+        'contexto',
         'matriz',
         'numerodaamostra',
         'codigodaamostra',
@@ -212,6 +239,7 @@ class ImportacaoController {
         datacoleta: '01/12/2024',
         valor_medido: '0.5',
         legislacao: 'Portaria 888/2021',
+        contexto: 'P888_POTABILIDADE',
         matriz: 'Água',
         numerodaamostra: '001',
         codigodaamostra: 'AMO-2024-001',
@@ -230,11 +258,10 @@ class ImportacaoController {
 
       } else if (formato === 'xlsx') {
         const dados = [colunas, Object.values(exemploLinha)];
-        const worksheet = XLSX.utils.aoa_to_sheet(dados);
-        const workbook = XLSX.utils.book_new();
-        XLSX.utils.book_append_sheet(workbook, worksheet, 'Template');
-
-        const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+        const buffer = await writeXlsxFile(dados, {
+          columns: colunas.map(() => ({ width: 24 })),
+          stickyRowsCount: 1,
+        }).toBuffer();
 
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', 'attachment; filename=template_importacao.xlsx');

@@ -1,0 +1,12 @@
+const express=require('express');
+const Controller=require('../controllers/MetodoAnaliticoController');
+const roleFromTable=require('../middleware/RoleFromTable');
+const router=express.Router();
+const read=roleFromTable('Gestor','Analista','Usuário');
+const manage=roleFromTable('Gestor');
+router.get('/',read,Controller.findAll);
+router.post('/',manage,Controller.create);
+router.get('/:id',read,Controller.findById);
+router.put('/:id',manage,Controller.update);
+router.delete('/:id',manage,Controller.deactivate);
+module.exports=router;

@@ -1,94 +1,80 @@
-// models/DashboardWebModel.js
 const pool = require('../config/database');
 
 class DashboardWebModel {
-  static async getDashboardData(filtros = {}) {
-    try {
-      const {
-        matriz_id,
-        legislacao_id,
-        amostra_numero,
-        parametro_id,
-        data_coleta,
-        data_publicacao,
-        status
-      } = filtros;
+  static async getDashboardData(filters = {}) {
+    const {
+      matriz_id: matrixId,
+      legislacao_id: legislationId,
+      amostra_numero: sampleNumber,
+      parametro_id: parameterIds,
+      data_coleta: collectionDate,
+      data_publicacao: publicationDate,
+    } = filters;
 
-      const params = [];
-      let whereClause = '';
-      let idx = 1;
+    const values = [];
+    const clauses = [
+      'ra.deleted_at is null',
+      "ra.status_resultado = 'publicado'",
+      'a.deleted_at is null',
+    ];
+    const add = (sql, value) => {
+      values.push(value);
+      clauses.push(`${sql} $${values.length}`);
+    };
 
-      if (matriz_id) {
-        whereClause += ` AND m.id = $${idx++}`;
-        params.push(matriz_id);
-      }
-
-      if (legislacao_id) {
-        whereClause += ` AND l.id = $${idx++}`;
-        params.push(legislacao_id);
-      }
-
-      if (amostra_numero) {
-        whereClause += ` AND a.numero_da_amostra = $${idx++}`;
-        params.push(amostra_numero);
-      }
-
-      if (parametro_id?.length) {
-        whereClause += ` AND p.id = ANY($${idx++})`;
-        params.push(parametro_id);
-      }
-
-      if (data_publicacao) {
-        whereClause += ` AND ra.datadapublicacao >= $${idx}::date AND ra.datadapublicacao < ($${idx++}::date + INTERVAL '1 day')`;
-        params.push(data_publicacao);
-      }
-
-      if (data_coleta) {
-        whereClause += ` AND ra.datacoleta >= $${idx}::date AND ra.datacoleta < ($${idx++}::date + INTERVAL '1 day')`;
-        params.push(data_coleta);
-      }
-
-
-      const query = `
-        SELECT
-          ra.id,
-          ra.valor_medido AS valor_parametro,
-          ra.datacoleta,
-          ra.created_at,
-
-          p.id AS parametro_id,
-          p.nome,
-          p.unidade_medida,
-          p.limite_minimo,
-          p.limite_maximo,
-
-          a.codigo_amostra,
-          a.numero_da_amostra,
-
-          m.id AS matriz_id,
-          m.nome AS matriz_nome,
-
-          l.id AS legislacao_id,
-          l.sigla AS legislacao_sigla,
-          l.nome AS legislacao_nome
-
-        FROM resultado_analise ra
-        LEFT JOIN parametro p ON ra.parametro_id = p.id
-        LEFT JOIN amostra a ON ra.amostra_id = a.id
-        LEFT JOIN matriz m ON a.matriz_id = m.id
-        LEFT JOIN legislacao l ON p.legislacao_id = l.id
-        WHERE 1=1
-      `;
-
-      const finalQuery =
-        query + whereClause + ' ORDER BY ra.datacoleta DESC';
-
-      const result = await pool.query(finalQuery, params);
-      return result.rows;
-
-    } catch (error) {
-      throw error;
+    if (matrixId) add('a.matriz_id =', matrixId);
+    if (legislationId) {
+      add("(ra.snapshot_analitico->'referencia_legal'->>'legislacao_id')::bigint =", legislationId);
     }
+    if (sampleNumber) add('a.numero_da_amostra =', sampleNumber);
+    if (parameterIds?.length) {
+      values.push(parameterIds);
+      clauses.push(`ra.parametro_id = any($${values.length})`);
+    }
+    if (publicationDate) {
+      values.push(publicationDate);
+      clauses.push(`ra.datadapublicacao >= $${values.length}::date
+        and ra.datadapublicacao < ($${values.length}::date + interval '1 day')`);
+    }
+    if (collectionDate) {
+      values.push(collectionDate);
+      clauses.push(`ra.datacoleta >= $${values.length}::date
+        and ra.datacoleta < ($${values.length}::date + interval '1 day')`);
+    }
+
+    const result = await pool.query(`
+      select
+        ra.id,
+        ra.valor_medido as valor_parametro,
+        ra.valor_qualitativo,
+        ra.datacoleta,
+        ra.created_at,
+        ra.parametro_id,
+        coalesce(
+          ra.snapshot_analitico->'parametro'->>'nome',
+          ra.parametro_nome_aplicado
+        ) as nome,
+        coalesce(
+          ra.snapshot_analitico->'parametro'->>'unidade_medida',
+          ra.unidade_medida_aplicada
+        ) as unidade_medida,
+        ra.limite_minimo_aplicado as limite_minimo,
+        ra.limite_maximo_aplicado as limite_maximo,
+        ra.tipo_limite_aplicado as tipo_limite,
+        ra.criterio_legal_aplicado as criterio_legal,
+        a.codigo_amostra,
+        a.numero_da_amostra,
+        a.matriz_id,
+        ra.snapshot_analitico->'matriz'->>'nome' as matriz_nome,
+        (ra.snapshot_analitico->'referencia_legal'->>'legislacao_id')::bigint as legislacao_id,
+        ra.snapshot_analitico->'referencia_legal'->>'legislacao_sigla' as legislacao_sigla,
+        ra.snapshot_analitico->'referencia_legal'->>'legislacao_nome' as legislacao_nome
+      from resultado_analise ra
+      join amostra a on a.id = ra.amostra_id
+      where ${clauses.join(' and ')}
+      order by ra.datacoleta desc
+    `, values);
+    return result.rows;
   }
 }
 

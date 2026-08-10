@@ -2,32 +2,36 @@ const ParametroModel = require('../models/ParametroModel');
 const MatrizModel = require('../models/MatrizModel');
 const LegislacaoModel = require('../models/LegislacaoModel');
 
-exports.listarTudo = async (req, res) => {
-  const parametros = await ParametroModel.findAllGerenciamento();
-  const matrizes = await MatrizModel.findAll();
-  const legislacoes = await LegislacaoModel.findAll();
+exports.listarTudo = async (req, res, next) => {
+  try {
+    const [parametros, matrizes, legislacoes] = await Promise.all([
+      ParametroModel.findAllGerenciamento(),
+      MatrizModel.findAll(),
+      LegislacaoModel.findAll(),
+    ]);
 
-  res.json({
-    parametros,
-    matrizes,
-    legislacoes
-  });
+    return res.json({ parametros, matrizes, legislacoes });
+  } catch (error) {
+    return next(error);
+  }
 };
 
-exports.atualizarParametro = async (req, res) => {
-  const { id } = req.params;
+exports.atualizarParametro = async (req, res, next) => {
+  try {
+    const { id } = req.params;
 
-  if (
-    'nome' in req.body ||
-    'limite_minimo' in req.body ||
-    'limite_maximo' in req.body ||
-    'unidade_medida' in req.body
-  ) {
-    return res.status(400).json({
-      error: 'Campos não permitidos para alteração'
+    if (Object.keys(req.body).some((campo) => campo !== 'valor_parametro')) {
+      return res.status(400).json({
+        error: 'Campos não permitidos para alteração'
+      });
+    }
+
+    const atualizado = await ParametroModel.updateGerenciamento(id, req.body, {
+      actorUserId: req.user?.id,
+      requestId: req.requestId,
     });
+    return res.json(atualizado);
+  } catch (error) {
+    return next(error);
   }
-
-  const atualizado = await ParametroModel.updateGerenciamento(id, req.body);
-  res.json(atualizado);
 };

@@ -1,29 +1,40 @@
-// models/GraficoParametroModel.js
 const pool = require('../config/database');
 
 class GraficoParametroModel {
-
   static async getDadosGrafico() {
-    try {
-      const query = `
-        SELECT 
-          p.nome as parametro,
-          MIN(p.valor_parametro) as valor_parametro
-        FROM parametro p
-        WHERE p.valor_parametro IS NOT NULL 
-          AND p.limite_minimo IS NOT NULL
-          AND p.limite_maximo IS NOT NULL
-        GROUP BY p.nome
-        ORDER BY p.nome ASC
-      `;
-      
-      const result = await pool.query(query);
-      return result.rows;
-
-    } catch (error) {
-      console.error('Erro no GraficoParametroModel:', error);
-      throw new Error(`Erro ao buscar dados: ${error.message}`);
-    }
+    const result = await pool.query(`
+      select
+        ra.parametro_id,
+        coalesce(
+          ra.snapshot_analitico->'parametro'->>'nome',
+          ra.parametro_nome_aplicado
+        ) as parametro,
+        coalesce(
+          ra.snapshot_analitico->'parametro'->>'unidade_medida',
+          ra.unidade_medida_aplicada
+        ) as unidade_medida,
+        round(avg(ra.valor_medido)::numeric, 6) as valor_medio,
+        min(ra.valor_medido) as valor_minimo_observado,
+        max(ra.valor_medido) as valor_maximo_observado,
+        count(*)::int as total_analises,
+        max(ra.datacoleta) as ultima_coleta
+      from resultado_analise ra
+      join amostra a on a.id = ra.amostra_id and a.deleted_at is null
+      where ra.deleted_at is null
+        and ra.status_resultado = 'publicado'
+        and ra.valor_medido is not null
+      group by ra.parametro_id,
+        coalesce(
+          ra.snapshot_analitico->'parametro'->>'nome',
+          ra.parametro_nome_aplicado
+        ),
+        coalesce(
+          ra.snapshot_analitico->'parametro'->>'unidade_medida',
+          ra.unidade_medida_aplicada
+        )
+      order by parametro asc
+    `);
+    return result.rows;
   }
 }
 
