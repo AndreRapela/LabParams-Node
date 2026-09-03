@@ -37,6 +37,7 @@ O hash SHA-256 detecta alteração do snapshot armazenado, mas não substitui ba
 - Restringir e rotacionar a senha do banco, Secret/Service Role e chaves de deploy.
 - Rotacionar imediatamente qualquer segredo já exposto; apagar a mensagem não revoga a credencial.
 - Separar credenciais e projetos por ambiente; impedir acesso de desenvolvimento ao banco comercial.
+- Desabilitar cadastro público no Supabase: uma conta criada recebe perfil básico de leitura e, portanto, o signup aberto não é aceitável para um LIMS privado.
 
 Antes de qualquer piloto, rotacione toda senha ou chave administrativa que tenha sido compartilhada fora do cofre de segredos.
 
@@ -69,6 +70,7 @@ Referências oficiais: [guia de segurança da ANPD](https://www.gov.br/anpd/pt-b
 
 - [ ] Credenciais expostas rotacionadas e armazenadas em cofre.
 - [ ] MFA obrigatório para gestores e contas de infraestrutura.
+- [ ] Cadastro público desativado e criação de contas restrita ao fluxo administrativo.
 - [ ] CORS e `PUBLIC_APP_URL` restritos aos domínios HTTPS oficiais.
 - [ ] `LAB_*` revisadas pelo responsável técnico.
 - [ ] Maker-checker ativo e pelo menos dois gestores habilitados para continuidade.

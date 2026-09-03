@@ -12,6 +12,7 @@ jest.mock('../utils/logger', () => ({ warn: jest.fn() }));
 const ImportacaoModel = require('../models/ImportacaoModel');
 const pool = require('../config/database');
 const AmostraModel = require('../models/AmostraModel');
+const AuditLogModel = require('../models/AuditLogModel');
 
 describe('ImportacaoModel', () => {
   
@@ -304,6 +305,56 @@ describe('ImportacaoModel', () => {
       expect(resultado.sucesso).toBe(true);
       expect(resultado.dados.valor_medido).toBe(0);
     });
+
+    test('reaproveita cadastros repetidos durante a mesma importação', async () => {
+      pool.query.mockImplementation(async (sql) => {
+        const normalized = String(sql).toLowerCase();
+        if (normalized.includes('from amostra a')) {
+          return { rowCount: 1, rows: [{
+            id: 1, codigo_amostra: 'AMO-001', numero_da_amostra: '001',
+            matriz_id: 10, matriz_nome: 'Água', status_amostra: 'em_analise',
+          }] };
+        }
+        if (normalized.includes('from matriz')) {
+          return { rowCount: 1, rows: [{ id: 10, nome: 'Água' }] };
+        }
+        if (normalized.includes('from legislacao')) {
+          return { rowCount: 1, rows: [{ id: 5, nome: 'Portaria 888/2021', sigla: '888/2021' }] };
+        }
+        return { rowCount: 1, rows: [{
+          id: 20, nome: 'Turbidez', matriz_id: 10, legislacao_id: 5,
+          legislacao_nome: 'Portaria 888/2021', legislacao_sigla: '888/2021',
+        }] };
+      });
+      const cache = ImportacaoModel.createValidationCache();
+      const linha = {
+        datacoleta: '01/12/2024', valor_medido: '0.5', legislacao: 'Portaria 888/2021',
+        matriz: 'Água', numerodaamostra: '001', codigodaamostra: 'AMO-001',
+        parametro: 'Turbidez',
+      };
+
+      const [first, second] = await Promise.all([
+        ImportacaoModel.validarLinha(linha, 2, cache),
+        ImportacaoModel.validarLinha(linha, 3, cache),
+      ]);
+      const invalidQuantitative = await ImportacaoModel.validarLinha(
+        { ...linha, valor_medido: 'Ausente' },
+        4,
+        cache
+      );
+
+      expect(first.sucesso).toBe(true);
+      expect(second.sucesso).toBe(true);
+      expect(invalidQuantitative).toMatchObject({
+        sucesso: false,
+        erro: expect.stringMatching(/quantitativo.*numérico/i),
+      });
+      const calls = pool.query.mock.calls.map(([sql]) => String(sql).toLowerCase());
+      expect(calls.filter((sql) => sql.includes('from amostra a'))).toHaveLength(1);
+      expect(calls.filter((sql) => sql.includes('from matriz'))).toHaveLength(1);
+      expect(calls.filter((sql) => sql.includes('from legislacao'))).toHaveLength(1);
+      expect(calls).toHaveLength(6);
+    });
   });
 
   describe('parseData', () => {
@@ -380,6 +431,94 @@ describe('ImportacaoModel', () => {
       expect(insertionSql).toContain('insert into resultado_versao_snapshot');
       expect(insertionSql).toContain("'rascunho'");
       expect(mockClient.release).toHaveBeenCalled();
+    });
+
+    test('confirma importações grandes em transações de no máximo 100 linhas com auditoria correlacionada', async () => {
+      let nextId = 1;
+      const createClient = () => ({
+        query: jest.fn(async (sql, params) => {
+          const normalized = String(sql).toLowerCase();
+          if (normalized.includes('select * from amostra')) {
+            return {
+              rowCount: 1,
+              rows: [{ id: params[0], status_amostra: 'em_analise', local_atual: 'Bancada' }],
+            };
+          }
+          if (normalized.includes('with contexto as')) return { rows: [{ id: nextId++ }] };
+          return { rows: [] };
+        }),
+        release: jest.fn(),
+      });
+      const firstClient = createClient();
+      const secondClient = createClient();
+      pool.connect
+        .mockResolvedValueOnce(firstClient)
+        .mockResolvedValueOnce(secondClient);
+
+      const resultados = Array.from({ length: 101 }, (_, index) => ({
+        valor_medido: index,
+        amostra_id: 1,
+        parametro_id: index + 1,
+        datacoleta: '2024-12-01T00:00:00.000Z',
+        _linha_importacao: index + 2,
+      }));
+      const resultado = await ImportacaoModel.inserirLote(resultados, {
+        actorUserId: 'usuario-1',
+        requestId: 'request-1',
+      });
+
+      expect(resultado).toMatchObject({ inseridos: 101, erros: [] });
+      expect(pool.connect).toHaveBeenCalledTimes(2);
+      expect(firstClient.query).toHaveBeenCalledWith('COMMIT');
+      expect(secondClient.query).toHaveBeenCalledWith('COMMIT');
+      expect(firstClient.release).toHaveBeenCalledTimes(1);
+      expect(secondClient.release).toHaveBeenCalledTimes(1);
+      expect(AuditLogModel.record).toHaveBeenCalledTimes(2);
+      const auditMetadata = AuditLogModel.record.mock.calls.map(([, event]) => event.metadata);
+      expect(auditMetadata.map((metadata) => metadata.total)).toEqual([100, 1]);
+      expect(auditMetadata.map((metadata) => metadata.lote)).toEqual([1, 2]);
+      expect(auditMetadata.every((metadata) => metadata.total_lotes === 2)).toBe(true);
+      expect(auditMetadata[0].importacao_id).toBe(auditMetadata[1].importacao_id);
+    });
+
+    test('preserva a resposta parcial quando um lote posterior sofre falha de infraestrutura', async () => {
+      let nextId = 1;
+      const firstClient = {
+        query: jest.fn(async (sql, params) => {
+          const normalized = String(sql).toLowerCase();
+          if (normalized.includes('select * from amostra')) {
+            return {
+              rowCount: 1,
+              rows: [{ id: params[0], status_amostra: 'em_analise', local_atual: 'Bancada' }],
+            };
+          }
+          if (normalized.includes('with contexto as')) return { rows: [{ id: nextId++ }] };
+          return { rows: [] };
+        }),
+        release: jest.fn(),
+      };
+      pool.connect
+        .mockResolvedValueOnce(firstClient)
+        .mockRejectedValueOnce(new Error('banco temporariamente indisponível'));
+      const resultados = Array.from({ length: 101 }, (_, index) => ({
+        valor_medido: index,
+        amostra_id: 1,
+        parametro_id: index + 1,
+        datacoleta: '2024-12-01T00:00:00.000Z',
+        _linha_importacao: index + 2,
+      }));
+
+      const resultado = await ImportacaoModel.inserirLote(resultados, {
+        actorUserId: 'usuario-1',
+        requestId: 'request-2',
+      });
+
+      expect(resultado.inseridos).toBe(100);
+      expect(resultado.erros).toEqual([
+        expect.objectContaining({ linha: 102, erro: expect.stringMatching(/tente novamente/i) }),
+      ]);
+      expect(firstClient.query).toHaveBeenCalledWith('COMMIT');
+      expect(AuditLogModel.record).toHaveBeenCalledTimes(1);
     });
 
     test('isola falha de uma linha com SAVEPOINT e confirma as demais', async () => {

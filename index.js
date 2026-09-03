@@ -12,8 +12,11 @@ const authMiddleware = require('./middleware/Auth');
 const roleFromTable = require('./middleware/RoleFromTable');
 const pool = require('./config/database');
 const logger = require('./utils/logger');
+const { errorCategory, safeErrorCode, safeErrorLogFields } = require('./utils/safeError');
+const { safeRequestPath } = require('./utils/safeRequestPath');
 
 const alertasRoutes = require('./routes/AlertaRoutes');
+const acessoAtualRoutes = require('./routes/AcessoAtualRoutes');
 const amostraRoutes = require('./routes/AmostraRoutes');
 const dashboardTvRoutes = require('./routes/DashboardTvRoutes');
 const dashboardWebRoutes = require('./routes/DashboardWebRoutes');
@@ -52,6 +55,40 @@ const allowedOrigins = (process.env.CORS_ORIGINS || defaultOrigins.join(','))
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+const configuredReadinessCacheMs = Number(process.env.READINESS_CACHE_MS);
+const readinessCacheMs = Number.isInteger(configuredReadinessCacheMs)
+  && configuredReadinessCacheMs >= 250
+  && configuredReadinessCacheMs <= 30_000
+  ? configuredReadinessCacheMs
+  : 2_000;
+let readinessCache = { ready: false, expiresAt: 0 };
+let readinessProbe = null;
+
+async function databaseIsReady(requestId) {
+  const now = Date.now();
+  if (readinessCache.expiresAt > now) return readinessCache.ready;
+  if (readinessProbe) return readinessProbe;
+
+  readinessProbe = (async () => {
+    try {
+      await pool.query('select 1');
+      readinessCache = { ready: true, expiresAt: Date.now() + readinessCacheMs };
+      return true;
+    } catch (error) {
+      readinessCache = { ready: false, expiresAt: Date.now() + readinessCacheMs };
+      logger.warn('readiness_check_failed', {
+        request_id: requestId || null,
+        category: errorCategory(error),
+        code: safeErrorCode(error),
+      });
+      return false;
+    } finally {
+      readinessProbe = null;
+    }
+  })();
+
+  return readinessProbe;
+}
 
 const corsOptions = {
   origin(origin, callback) {
@@ -80,7 +117,7 @@ app.use((req, res, next) => {
     logger.info('http_request', {
       request_id: req.requestId,
       method: req.method,
-      path: req.originalUrl.split('?')[0],
+      path: safeRequestPath(req.originalUrl),
       status: res.statusCode,
       duration_ms: Number(durationMs.toFixed(2)),
       actor_user_id: req.user?.id || null,
@@ -104,30 +141,45 @@ app.use(rateLimit({
 }));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
+app.use((req, res, next) => {
+  if (req.body === undefined) {
+    req.body = {};
+    return next();
+  }
+  if (req.body === null || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    return res.status(400).json({
+      success: false,
+      error: 'INVALID_BODY',
+      message: 'O corpo da requisição deve ser um objeto JSON.',
+      request_id: req.requestId,
+    });
+  }
+  return next();
+});
 
 app.get('/', (_req, res) => {
   res.json({ message: 'API SYSmLab online', version: '1.0.0' });
 });
 
 app.get('/health/live', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 app.get(['/health', '/health/ready'], async (req, res) => {
-  try {
-    await pool.query('select 1');
+  res.setHeader('Cache-Control', 'no-store');
+  if (await databaseIsReady(req.requestId)) {
     return res.json({
       status: 'ready',
       timestamp: new Date().toISOString(),
       request_id: req.requestId,
     });
-  } catch (_error) {
-    return res.status(503).json({
-      status: 'unavailable',
-      timestamp: new Date().toISOString(),
-      request_id: req.requestId,
-    });
   }
+  return res.status(503).json({
+    status: 'unavailable',
+    timestamp: new Date().toISOString(),
+    request_id: req.requestId,
+  });
 });
 
 const noStore = (_req, res, next) => {
@@ -137,6 +189,10 @@ const noStore = (_req, res, next) => {
 
 // O portador do documento pode validar o hash sem expor cliente ou resultados.
 app.use('/verificar-laudo', noStore, verificacaoLaudoRoutes);
+
+// Permite que a própria conta autenticada descubra se está pendente sem passar
+// pelo RBAC, evitando navegar para o dashboard antes de mostrar o estado real.
+app.use('/acesso-atual', authMiddleware, noStore, acessoAtualRoutes);
 
 const protectedRoutes = [
   ['/parametros', parametroRoutes],
@@ -157,9 +213,10 @@ const protectedRoutes = [
   ['/equipamentos', equipamentoRoutes],
   ['/qualidade', qualidadeRoutes],
 ];
+const registeredUser = roleFromTable('Gestor', 'Analista', 'Usuário');
 
 for (const [path, router] of protectedRoutes) {
-  app.use(path, authMiddleware, noStore, router);
+  app.use(path, authMiddleware, noStore, registeredUser, router);
 }
 
 app.use(
@@ -203,19 +260,40 @@ app.use((error, _req, res, _next) => {
     });
   }
 
+  if (error.type === 'entity.parse.failed') {
+    return res.status(400).json({
+      success: false,
+      error: 'INVALID_JSON',
+      message: 'O corpo da requisição contém JSON inválido.',
+      request_id: _req.requestId,
+    });
+  }
+
+  if (error.type === 'entity.too.large' || error.status === 413) {
+    return res.status(413).json({
+      success: false,
+      error: 'PAYLOAD_TOO_LARGE',
+      message: 'O corpo da requisição excede o limite permitido.',
+      request_id: _req.requestId,
+    });
+  }
+
   if (process.env.NODE_ENV !== 'test') {
     logger.error('unhandled_error', {
       request_id: _req.requestId,
       method: _req.method,
-      path: _req.originalUrl.split('?')[0],
-      message: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+      path: safeRequestPath(_req.originalUrl),
+      ...safeErrorLogFields(error),
     });
   }
 
-  return res.status(error.status || 500).json({
+  const status = Number(error.statusCode || error.status);
+  const safeStatus = Number.isInteger(status) && status >= 400 && status < 600
+    ? status
+    : 500;
+  return res.status(safeStatus).json({
     success: false,
-    error: 'Erro interno do servidor',
+    error: safeStatus >= 500 ? 'Erro interno do servidor' : 'Requisição inválida',
     request_id: _req.requestId,
   });
 });
@@ -242,14 +320,14 @@ if (require.main === module) {
       try {
         if (typeof pool.end === 'function') await pool.end();
       } catch (poolError) {
-        logger.error('database_pool_shutdown_failed', { message: poolError.message });
+        logger.error('database_pool_shutdown_failed', safeErrorLogFields(poolError));
         error ||= poolError;
       } finally {
         clearTimeout(forcedExit);
       }
 
       if (error) {
-        logger.error('server_shutdown_failed', { message: error.message });
+        logger.error('server_shutdown_failed', safeErrorLogFields(error));
         process.exit(1);
       }
       logger.info('server_shutdown_completed', { signal });

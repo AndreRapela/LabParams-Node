@@ -3,9 +3,26 @@ const AuditLogModel = require('./AuditLogModel');
 const AmostraModel = require('./AmostraModel');
 const { workflowError } = require('../utils/workflowPiloto');
 const logger = require('../utils/logger');
+const { randomUUID } = require('crypto');
+
+const IMPORT_TRANSACTION_BATCH_SIZE = 100;
 
 class ImportacaoModel {
-  static async validarLinha(linha, numeroLinha) {
+  static createValidationCache() {
+    return {
+      amostras: new Map(),
+      matrizes: new Map(),
+      legislacoes: new Map(),
+    };
+  }
+
+  static async queryCached(cache, key, query) {
+    if (!(cache instanceof Map)) return query();
+    if (!cache.has(key)) cache.set(key, Promise.resolve().then(query));
+    return cache.get(key);
+  }
+
+  static async validarLinha(linha, numeroLinha, validationCache = null) {
     try {
       const obrigatorios = [
         'datacoleta', 'valor_medido', 'legislacao', 'matriz',
@@ -30,14 +47,18 @@ class ImportacaoModel {
 
       const codigoAmostra = String(linha.codigodaamostra).trim();
       const numeroAmostra = String(linha.numerodaamostra).trim();
-      const amostraResult = await pool.query(`
-        select a.id, a.codigo_amostra, a.numero_da_amostra, a.matriz_id,
-               a.status_amostra, m.nome as matriz_nome
-        FROM amostra a
-        JOIN matriz m on a.matriz_id = m.id
-        WHERE a.codigo_amostra = $1 and a.numero_da_amostra = $2
-          and a.deleted_at is null
-      `, [codigoAmostra, numeroAmostra]);
+      const amostraResult = await this.queryCached(
+        validationCache?.amostras,
+        `${codigoAmostra}\u0000${numeroAmostra}`,
+        () => pool.query(`
+          select a.id, a.codigo_amostra, a.numero_da_amostra, a.matriz_id,
+                 a.status_amostra, m.nome as matriz_nome
+          FROM amostra a
+          JOIN matriz m on a.matriz_id = m.id
+          WHERE a.codigo_amostra = $1 and a.numero_da_amostra = $2
+            and a.deleted_at is null
+        `, [codigoAmostra, numeroAmostra])
+      );
       if (!amostraResult.rowCount) {
         return this.falha(`Amostra não encontrada (código: ${codigoAmostra}, número: ${numeroAmostra})`);
       }
@@ -47,9 +68,13 @@ class ImportacaoModel {
       }
 
       const nomeMatriz = String(linha.matriz).trim();
-      const matrizResult = await pool.query(
-        'SELECT id, nome FROM matriz WHERE lower(nome) = lower($1)',
-        [nomeMatriz]
+      const matrizResult = await this.queryCached(
+        validationCache?.matrizes,
+        nomeMatriz.toLocaleLowerCase('pt-BR'),
+        () => pool.query(
+          'SELECT id, nome FROM matriz WHERE lower(nome) = lower($1)',
+          [nomeMatriz]
+        )
       );
       if (!matrizResult.rowCount) return this.falha(`Matriz '${nomeMatriz}' não encontrada no banco`);
       const matriz = matrizResult.rows[0];
@@ -58,10 +83,14 @@ class ImportacaoModel {
       }
 
       const nomeLegislacao = String(linha.legislacao).trim();
-      const legislacaoResult = await pool.query(`
-        SELECT id, nome, sigla FROM legislacao
-        WHERE lower(nome) = lower($1) or lower(sigla) = lower($1)
-      `, [nomeLegislacao]);
+      const legislacaoResult = await this.queryCached(
+        validationCache?.legislacoes,
+        nomeLegislacao.toLocaleLowerCase('pt-BR'),
+        () => pool.query(`
+          SELECT id, nome, sigla FROM legislacao
+          WHERE lower(nome) = lower($1) or lower(sigla) = lower($1)
+        `, [nomeLegislacao])
+      );
       if (!legislacaoResult.rowCount) {
         return this.falha(`Legislação '${nomeLegislacao}' não encontrada no banco`);
       }
@@ -112,6 +141,8 @@ class ImportacaoModel {
         }
         valorMedido = null;
         valorQualitativo = textoValor.toLowerCase() === 'ausente' ? 'Ausente' : 'Presente';
+      } else if (valorQualitativoInformado) {
+        return this.falha('Resultado quantitativo deve possuir um valor numérico');
       }
 
       const contextoNome = parametro.contexto_nome;
@@ -181,6 +212,68 @@ class ImportacaoModel {
   }
 
   static async inserirLote(resultados, auditContext = {}) {
+    if (!Array.isArray(resultados) || resultados.length === 0) {
+      return { inseridos: 0, erros: [], amostras_em_analise: [] };
+    }
+
+    const importacaoId = auditContext.importacaoId || randomUUID();
+    const totalLotes = Math.ceil(resultados.length / IMPORT_TRANSACTION_BATCH_SIZE);
+    const erros = [];
+    const amostrasAfetadas = new Set();
+    let inseridos = 0;
+
+    for (let start = 0; start < resultados.length; start += IMPORT_TRANSACTION_BATCH_SIZE) {
+      const lote = resultados
+        .slice(start, start + IMPORT_TRANSACTION_BATCH_SIZE)
+        .map((item, index) => Number.isInteger(item._linha_importacao)
+          ? item
+          : { ...item, _linha_importacao: start + index + 1 });
+      const numeroLote = Math.floor(start / IMPORT_TRANSACTION_BATCH_SIZE) + 1;
+      try {
+        const parcial = await this.inserirLoteTransacao(lote, {
+          ...auditContext,
+          importacaoId,
+          numeroLote,
+          totalLotes,
+          totalImportacao: resultados.length,
+        });
+        inseridos += parcial.inseridos;
+        erros.push(...parcial.erros);
+        for (const amostraId of parcial.amostras_em_analise) {
+          amostrasAfetadas.add(Number(amostraId));
+        }
+      } catch (error) {
+        if (inseridos === 0) throw error;
+
+        logger.warn('import_batch_failed_after_partial_commit', {
+          request_id: auditContext.requestId || null,
+          importacao_id: importacaoId,
+          lote: numeroLote,
+          total_lotes: totalLotes,
+          code: error.code || null,
+        });
+        const mensagem = this.mensagemErroInsercao(error);
+        for (let index = start; index < resultados.length; index += 1) {
+          const item = resultados[index];
+          const { _linha_importacao, ...publicItem } = item;
+          erros.push({
+            linha: Number.isInteger(_linha_importacao) ? _linha_importacao : index + 1,
+            dados: publicItem,
+            erro: mensagem,
+          });
+        }
+        break;
+      }
+    }
+
+    return {
+      inseridos,
+      erros,
+      amostras_em_analise: [...amostrasAfetadas],
+    };
+  }
+
+  static async inserirLoteTransacao(resultados, auditContext = {}) {
     const client = await pool.connect();
     let inseridos = 0;
     const erros = [];
@@ -400,6 +493,10 @@ class ImportacaoModel {
             erros: erros.length,
             resultado_ids: resultadoIds,
             amostra_ids: [...amostrasAfetadas],
+            importacao_id: auditContext.importacaoId || null,
+            lote: auditContext.numeroLote || 1,
+            total_lotes: auditContext.totalLotes || 1,
+            total_importacao: auditContext.totalImportacao || resultados.length,
           },
         });
       }

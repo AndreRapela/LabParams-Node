@@ -1,5 +1,11 @@
 const DashboardTvModel = require('../models/DashboardTvModel');
-const { avaliarStatusOperacional } = require('../utils/conformidade');
+const {
+  STATUS_OPERACIONAIS,
+  avaliarStatusOperacional,
+} = require('../utils/conformidade');
+const { logSafeError } = require('../utils/safeError');
+
+const VALID_OPERATIONAL_STATUSES = new Set(STATUS_OPERACIONAIS);
 
 class DashboardTvController {
 
@@ -23,13 +29,21 @@ class DashboardTvController {
       const rows = await DashboardTvModel.getDashboardData({
         parametro_id: parametroIds
       });
-      const dados = rows.map((item) => ({
-        ...item,
-        status_conformidade: avaliarStatusOperacional({
+      const dados = rows.map((item) => {
+        const fallbackStatus = avaliarStatusOperacional({
           ...item,
           valor_medido: item.valor_parametro,
-        }),
-      }));
+        });
+        const status = VALID_OPERATIONAL_STATUSES.has(item.status_operacional)
+          ? item.status_operacional
+          : fallbackStatus;
+
+        return {
+          ...item,
+          status_operacional: status,
+          status_conformidade: status,
+        };
+      });
 
       return res.json({
         success: true,
@@ -38,7 +52,7 @@ class DashboardTvController {
       });
 
     } catch (error) {
-      console.error('Erro Dashboard TV:', error);
+      logSafeError('tv_dashboard_failed', error, { request_id: req.requestId || null });
       res.status(500).json({
         success: false,
         message: 'Erro ao carregar dashboard TV'

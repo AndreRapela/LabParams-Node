@@ -35,11 +35,25 @@ Ajustes operacionais:
 | `DB_IDLE_TIMEOUT_MS` | `30000` | conexão ociosa |
 | `DB_STATEMENT_TIMEOUT_MS` | `30000` | duração máxima de consulta |
 
-Mantenha `DATABASE_SSL_REJECT_UNAUTHORIZED=true`, que é o padrão seguro, e informe `DATABASE_SSL_CA` ou `DATABASE_SSL_CA_PATH` quando o provedor exigir uma CA privada. Para o Supabase hospedado, o repositório inclui `config/certs/supabase-prod-ca-2021.crt`, obtido do endereço oficial de certificados do provedor; acompanhe a rotação e a validade da CA. O valor `false` só deve ser usado como exceção temporária, após análise de risco, porque cifra a conexão sem autenticar o servidor. `SUPABASE_JWT_SECRET` e `SUPABASE_ANON_KEY` são fallbacks para projetos legados, não a configuração preferida.
+Mantenha `DATABASE_SSL_REJECT_UNAUTHORIZED=true`, que é o padrão seguro, e informe `DATABASE_SSL_CA` ou `DATABASE_SSL_CA_PATH` quando o provedor exigir uma CA privada. Para o Supabase hospedado, o repositório inclui `config/certs/supabase-prod-ca-2021.crt`, obtido do endereço oficial de certificados do provedor; acompanhe a rotação e a validade da CA. O verificador de banco sempre exige TLS. `SUPABASE_JWT_SECRET` e `SUPABASE_ANON_KEY` continuam suportados em conjunto para projetos HS256 legados; projetos modernos devem usar Publishable/Secret e JWKS. A referência identificável no host/usuário PostgreSQL deve coincidir com a de `SUPABASE_URL`.
 
 ## Release
 
-1. Registrar versão implantada, janela e responsável; criar backup.
+Antes da janela, execute os gates automatizados abaixo. Eles categorizam falhas sem imprimir senha, host, URL de banco ou chaves:
+
+```powershell
+node scripts/check-migrations.js
+node scripts/check-supabase-config.js
+$env:NODE_ENV = "production"
+node scripts/check-production-env.js
+node scripts/verify-database.js
+```
+
+`check-migrations` faz análise léxica sem considerar comentários ou corpos de funções como DDL, valida nome, transação, codificação, RLS/revogação, `SECURITY DEFINER` e bloqueia operações destrutivas nas migrations novas. `check-supabase-config` impede regressão nos padrões locais de cadastro, senha e TOTP. `check-production-env` rejeita placeholders, HTTP, CORS aberto, TLS permissivo, combinação incompleta de credenciais modernas/legadas, versão Node fora de 22–24, divergência identificável entre projetos e identidade laboratorial incompleta. `verify-database` abre transação somente leitura, exige TLS e compara versões/conteúdo disponível das migrations, objetos inesperados, definições de índices, estado/tabela/função de triggers, overloads e configuração das funções, RLS, grants, ACLs padrão por owner e invariantes de dados.
+
+Esses verificadores são gates adicionais, não um parser SQL completo nem substitutos do `db push` em banco descartável de homologação. Migrations anteriores a `20260811010000` permanecem imutáveis; a política destrutiva ampliada vale desse marco em diante.
+
+1. Registrar versão implantada, janela e responsável; criar backup identificado.
 2. Rotacionar qualquer segredo que tenha sido exposto e atualizar o cofre/provedor.
 3. Executar testes, build, verificação sintática e auditoria de dependências.
 4. Aplicar migrações em homologação e executar UAT com os três perfis.
@@ -48,6 +62,8 @@ Mantenha `DATABASE_SSL_REJECT_UNAUTHORIZED=true`, que é o padrão seguro, e inf
 7. Aplicar migrações em produção; publicar API e frontend compatíveis.
 8. Confirmar health checks, login, emissão e verificação pública.
 9. Monitorar erros, latência, conexões, filas do provedor e tentativas de assinatura.
+
+Guarde a saída dos gates, o identificador do backup, o resultado da restauração, a versão implantada e as aprovações no registro da mudança. O modelo mínimo está em [`RELEASE-EVIDENCE.md`](./RELEASE-EVIDENCE.md).
 
 Comandos mínimos:
 
@@ -67,6 +83,12 @@ npm audit --omit=dev
 ```
 
 Não use `--include-seed` em produção sem revisar o seed e sua idempotência. Migrações de tabelas append-only e hashes devem ser tratadas como expansão; não remova colunas ou snapshots antigos durante o mesmo release.
+
+Nunca altere ou remova um arquivo já aplicado. O CI bloqueia esse tipo de mudança em pull requests e pushes para `main`, recusa migrations novas com timestamp anterior ou igual ao último da base e toda correção deve entrar em uma nova migration posterior. Antes e depois de `db push`, execute `node scripts/verify-database.js` e confirme contagem e conteúdo verificado do histórico.
+
+A migration `20260811010000` é a exceção deliberadamente não transacional: seus três índices usam `CREATE INDEX CONCURRENTLY`, que o PostgreSQL proíbe dentro de uma transação explícita. O gate aceita apenas esse padrão restrito — `CONCURRENTLY IF NOT EXISTS`, verificações semânticas antes/depois e operações idempotentes permitidas — e reprova mistura com DML ou DDL destrutivo.
+
+Execute-a primeiro em homologação com a mesma versão do executor da produção, meça duração, I/O e locks e monitore `pg_stat_progress_create_index`. Se houver interrupção e um índice ficar inválido, os checks semânticos abortarão a continuidade; inspecione `pg_index` e aplique um procedimento de recuperação aprovado e evidenciado. O deploy não remove nem recria automaticamente um índice potencialmente incorreto.
 
 ## Health e logs
 
@@ -98,6 +120,21 @@ Nunca registre `Authorization`, senha de reautenticação, chave Supabase, URL d
 - Execute e evidencie restauração periódica em ambiente isolado.
 - Após restauração, valide contagens, chaves, hashes de laudo, trilhas append-only e autenticação.
 - Defina exportação e descarte seguro. Arquivamento lógico no aplicativo não substitui política de retenção.
+
+O teste de restauração não está concluído apenas porque o banco iniciou. Registre duração e valide `node scripts/verify-database.js`, autenticação, contagens acordadas, amostras publicadas, hashes de laudo, trilhas de workflow/auditoria e anexos externos. A credencial usada no teste deve ser exclusiva do ambiente isolado e revogada ao final.
+
+## Configuração Supabase fora do código
+
+O arquivo `supabase/config.toml` mantém cadastro público desativado, senha forte, confirmação de e-mail, troca segura de senha e TOTP disponível como padrão local. No projeto hospedado, confirme separadamente no Dashboard/API de gestão:
+
+- cadastro público desativado; usuários criados apenas pelo fluxo administrativo;
+- senha mínima e proteção contra senhas vazadas conforme o plano contratado;
+- MFA obrigatório para Gestores e contas de infraestrutura;
+- URLs de site/redirect limitadas ao domínio HTTPS oficial;
+- proteção SMTP, CAPTCHA/rate limits e alertas de autenticação;
+- SSL enforcement do banco e restrição de rede compatível com o provedor de deploy.
+
+Não use `supabase/config.toml` como evidência de que o projeto remoto já recebeu essas opções; exporte ou registre a configuração efetiva do ambiente na liberação.
 
 ## Monitoramento mínimo
 

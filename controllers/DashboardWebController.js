@@ -1,6 +1,8 @@
 const DashboardWebModel = require('../models/DashboardWebModel');
 const pool = require('../config/database');
 const { avaliarStatusOperacional } = require('../utils/conformidade');
+const { parsePagination, workflowError } = require('../utils/workflowPiloto');
+const { logSafeError } = require('../utils/safeError');
 
 const VALID_STATUSES = new Set([
   'conforme',
@@ -16,9 +18,74 @@ function parseNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function parsePositiveId(value) {
+function parsePositiveId(value, field) {
+  if (value === null || value === undefined || value === '') return null;
   const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw workflowError(`${field} deve ser um identificador inteiro positivo.`, 400, 'FILTRO_INVALIDO');
+  }
+  return parsed;
+}
+
+function parseDate(value, field) {
+  if (value === null || value === undefined || value === '') return null;
+  const normalized = String(value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    throw workflowError(`${field} deve usar o formato AAAA-MM-DD.`, 400, 'FILTRO_INVALIDO');
+  }
+  const parsed = new Date(`${normalized}T00:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== normalized) {
+    throw workflowError(`${field} não é uma data válida.`, 400, 'FILTRO_INVALIDO');
+  }
+  return normalized;
+}
+
+function parseParameterIds(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const raw = (Array.isArray(value) ? value : [value])
+    .flatMap((item) => String(item).split(','))
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!raw.length || raw.length > 100) {
+    throw workflowError('Informe entre 1 e 100 parâmetros.', 400, 'FILTRO_INVALIDO');
+  }
+  return [...new Set(raw.map((item) => parsePositiveId(item, 'parametro_id')))];
+}
+
+function parseStatuses(value) {
+  if (value === null || value === undefined || value === '') return [];
+  const statuses = String(value)
+    .split(',')
+    .map((status) => status.trim().toLowerCase())
+    .filter(Boolean);
+  if (!statuses.length || statuses.some((status) => !VALID_STATUSES.has(status))) {
+    throw workflowError('Status de conformidade inválido.', 400, 'FILTRO_INVALIDO');
+  }
+  return [...new Set(statuses)];
+}
+
+function parseSampleNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const normalized = String(value).trim();
+  if (!normalized || normalized.length > 100) {
+    throw workflowError('Número da amostra inválido.', 400, 'FILTRO_INVALIDO');
+  }
+  return normalized;
+}
+
+function sendDashboardError(req, res, error, fallback) {
+  const status = Number(error.statusCode) || 500;
+  if (status >= 500) {
+    logSafeError('dashboard_web_failed', error, { request_id: req.requestId || null });
+  }
+  return res.status(status).json({
+    success: false,
+    message: status < 500 ? error.message : fallback,
+    code: error.code,
+    request_id: req.requestId,
+    data: [],
+    statistics: buildStatistics([]),
+  });
 }
 
 function calculatePercentage(value, minimum, maximum) {
@@ -36,10 +103,13 @@ function formatDashboardItem(item, index) {
   const minimum = parseNumber(item.limite_minimo);
   const maximum = parseNumber(item.limite_maximo);
   const percentage = calculatePercentage(numericValue, minimum, maximum);
-  const status = avaliarStatusOperacional({
+  const calculatedStatus = avaliarStatusOperacional({
     ...item,
     valor_medido: numericValue,
   });
+  const status = VALID_STATUSES.has(item.status_operacional)
+    ? item.status_operacional
+    : calculatedStatus;
 
   return {
     id: item.id || index + 1,
@@ -86,56 +156,59 @@ function buildStatistics(data) {
   };
 }
 
+function buildPagination({ page, pageSize, total }) {
+  const totalPages = total > 0 ? Math.ceil(total / pageSize) : 0;
+  return {
+    page,
+    page_size: pageSize,
+    total,
+    total_pages: totalPages,
+    has_next: page < totalPages,
+    has_previous: page > 1 && totalPages > 0,
+  };
+}
+
 const DashboardWebController = {
   async getDashboardData(req, res) {
     try {
-      const parameterIds = req.query.parametro_id
-        ? String(req.query.parametro_id)
-            .split(',')
-            .map(parsePositiveId)
-            .filter(Boolean)
-        : null;
+      const parameterIds = parseParameterIds(req.query.parametro_id);
 
       const filters = {
-        matriz_id: parsePositiveId(req.query.matriz_id),
-        legislacao_id: parsePositiveId(req.query.legislacao_id),
-        amostra_numero: req.query.amostra_numero || null,
-        parametro_id: parameterIds?.length ? parameterIds : null,
-        data_coleta: req.query.data_coleta || null,
-        data_publicacao: req.query.data_publicacao || null,
+        matriz_id: parsePositiveId(req.query.matriz_id, 'matriz_id'),
+        legislacao_id: parsePositiveId(req.query.legislacao_id, 'legislacao_id'),
+        amostra_numero: parseSampleNumber(req.query.amostra_numero),
+        parametro_id: parameterIds,
+        data_coleta: parseDate(req.query.data_coleta, 'data_coleta'),
+        data_publicacao: parseDate(req.query.data_publicacao, 'data_publicacao'),
       };
 
-      const requestedStatuses = req.query.status
-        ? String(req.query.status)
-            .split(',')
-            .map((status) => status.trim().toLowerCase())
-            .filter((status) => VALID_STATUSES.has(status))
-        : [];
+      const requestedStatuses = parseStatuses(req.query.status);
+      const pagination = parsePagination({
+        page: req.query.page ?? 1,
+        page_size: req.query.page_size ?? 100,
+      });
 
-      const rows = await DashboardWebModel.getDashboardData(filters);
-      let data = rows.map(formatDashboardItem);
-
-      if (requestedStatuses.length) {
-        data = data.filter((item) => requestedStatuses.includes(item.status));
-      }
+      const result = await DashboardWebModel.getDashboardData(filters, {
+        ...pagination,
+        statuses: requestedStatuses,
+      });
+      const data = result.rows.map(formatDashboardItem);
 
       return res.json({
         success: true,
         data,
-        statistics: buildStatistics(data),
+        statistics: result.statistics,
+        statistics_scope: 'filtered_results',
+        pagination: buildPagination(result),
         last_updated: new Date().toISOString(),
-        filters_applied: filters,
+        filters_applied: {
+          ...filters,
+          status: requestedStatuses.length ? requestedStatuses : null,
+        },
         ...(data.length ? {} : { message: 'Nenhum resultado encontrado' }),
       });
     } catch (error) {
-      console.error('Erro ao carregar dashboard:', error.message);
-      return res.status(500).json({
-        success: false,
-        message: 'Erro interno ao carregar dados',
-        data: [],
-        statistics: buildStatistics([]),
-        timestamp: new Date().toISOString(),
-      });
+      return sendDashboardError(req, res, error, 'Erro interno ao carregar dados');
     }
   },
 
@@ -162,10 +235,17 @@ const DashboardWebController = {
         timestamp: new Date().toISOString(),
       });
     } catch (error) {
-      console.error('Erro ao carregar opções de filtro:', error.message);
-      return res.status(500).json({
+      const status = Number(error.statusCode) || 500;
+      if (status >= 500) {
+        logSafeError('dashboard_filter_options_failed', error, {
+          request_id: _req.requestId || null,
+        });
+      }
+      return res.status(status).json({
         success: false,
-        message: 'Erro ao carregar opções de filtro',
+        message: status < 500 ? error.message : 'Erro ao carregar opções de filtro',
+        code: error.code,
+        request_id: _req.requestId,
         matrizes: [],
         legislacoes: [],
       });
@@ -174,3 +254,7 @@ const DashboardWebController = {
 };
 
 module.exports = DashboardWebController;
+module.exports.parseDate = parseDate;
+module.exports.parseParameterIds = parseParameterIds;
+module.exports.parsePositiveId = parsePositiveId;
+module.exports.parseStatuses = parseStatuses;

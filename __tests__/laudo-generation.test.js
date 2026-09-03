@@ -122,6 +122,9 @@ describe('emissão íntegra de laudos', () => {
     jest.clearAllMocks();
     process.env.LAB_NOME = 'Laboratório Configurado';
     process.env.LAB_DOCUMENTO = '00.000.000/0001-00';
+    process.env.LAB_ENDERECO = 'Rua da Qualidade, 100';
+    process.env.LAB_CONTATO = 'qualidade@laboratorio.invalid';
+    process.env.PUBLIC_APP_URL = 'https://laudos.laboratorio.invalid';
     AssinaturaEletronicaModel.create.mockResolvedValue({
       id: '30',
       payload_hash: 'a'.repeat(64),
@@ -134,6 +137,9 @@ describe('emissão íntegra de laudos', () => {
   afterAll(() => {
     delete process.env.LAB_NOME;
     delete process.env.LAB_DOCUMENTO;
+    delete process.env.LAB_ENDERECO;
+    delete process.env.LAB_CONTATO;
+    delete process.env.PUBLIC_APP_URL;
   });
 
   test('usa somente a identidade configurada e vincula assinatura REPORT_ISSUE', async () => {
@@ -193,5 +199,53 @@ describe('emissão íntegra de laudos', () => {
       },
     })).rejects.toMatchObject({ code: 'MOTIVO_REVISAO_OBRIGATORIO' });
     expect(AssinaturaEletronicaModel.create).not.toHaveBeenCalled();
+  });
+
+  test('produção recusa identidade laboratorial incompleta antes de acessar o banco', async () => {
+    const previousEnvironment = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    delete process.env.LAB_CONTATO;
+
+    try {
+      await expect(LaudoModel.generate(1, {}, {
+        actorUserId: 'user-1',
+        signatureContext: {
+          userId: 'user-1',
+          authenticatedAt: '2026-07-29T12:59:59.000Z',
+          authMethod: 'supabase_password',
+        },
+      })).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'REPORT_CONFIGURATION_INVALID',
+      });
+      expect(pool.connect).not.toHaveBeenCalled();
+    } finally {
+      process.env.NODE_ENV = previousEnvironment;
+      process.env.LAB_CONTATO = 'qualidade@laboratorio.invalid';
+    }
+  });
+
+  test('produção recusa URL pública sem HTTPS antes de acessar o banco', async () => {
+    const previousEnvironment = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    process.env.PUBLIC_APP_URL = 'http://localhost:4200';
+
+    try {
+      await expect(LaudoModel.generate(1, {}, {
+        actorUserId: 'user-1',
+        signatureContext: {
+          userId: 'user-1',
+          authenticatedAt: '2026-07-29T12:59:59.000Z',
+          authMethod: 'supabase_password',
+        },
+      })).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'REPORT_CONFIGURATION_INVALID',
+      });
+      expect(pool.connect).not.toHaveBeenCalled();
+    } finally {
+      process.env.NODE_ENV = previousEnvironment;
+      process.env.PUBLIC_APP_URL = 'https://laudos.laboratorio.invalid';
+    }
   });
 });

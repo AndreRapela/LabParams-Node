@@ -1,6 +1,9 @@
 const { Pool } = require('pg');
 const fs = require('fs');
 const path = require('path');
+const logger = require('../utils/logger');
+const { normalizeProductionDatabaseUrl } = require('../utils/databaseTls');
+const { safeErrorLogFields } = require('../utils/safeError');
 
 function boundedInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
   const parsed = Number(value);
@@ -21,8 +24,20 @@ function loadConfiguredCa() {
 }
 
 function buildSslConfig(connectionString) {
-  const isLocal = /localhost|127\.0\.0\.1/.test(connectionString);
-  if (process.env.DATABASE_SSL === 'false' || isLocal) return false;
+  const isProduction = process.env.NODE_ENV === 'production';
+  let hostname = null;
+  try {
+    const parsed = new URL(connectionString);
+    if (['postgres:', 'postgresql:'].includes(parsed.protocol)) {
+      hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    }
+  } catch {
+    // Falha fechada: uma URL inválida jamais é tratada como conexão local sem TLS.
+  }
+  const isLocal = ['localhost', '127.0.0.1', '::1'].includes(hostname);
+  if (!isProduction && (isLocal || (hostname && process.env.DATABASE_SSL === 'false'))) {
+    return false;
+  }
 
   const configuredCa = loadConfiguredCa();
   if (configuredCa) {
@@ -30,13 +45,18 @@ function buildSslConfig(connectionString) {
   }
 
   return {
-    rejectUnauthorized: process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== 'false',
+    rejectUnauthorized: isProduction
+      ? true
+      : process.env.DATABASE_SSL_REJECT_UNAUTHORIZED !== 'false',
   };
 }
 
 function buildConnectionString() {
   if (process.env.DATABASE_URL) {
-    return process.env.DATABASE_URL.trim().replace(/[\r\n]/g, '');
+    const configured = process.env.DATABASE_URL.trim().replace(/[\r\n]/g, '');
+    return process.env.NODE_ENV === 'production'
+      ? normalizeProductionDatabaseUrl(configured)
+      : configured;
   }
 
   if (!process.env.DB_HOST) return null;
@@ -52,7 +72,11 @@ function buildConnectionString() {
 const connectionString = buildConnectionString();
 
 if (!connectionString) {
-  const disconnected = () => Promise.reject(new Error('Banco de dados não configurado'));
+  const disconnected = () => {
+    const error = new Error('Banco de dados não configurado');
+    error.code = 'DATABASE_NOT_CONFIGURED';
+    return Promise.reject(error);
+  };
   module.exports = { query: disconnected, connect: disconnected };
 } else {
   const pool = new Pool({
@@ -74,8 +98,12 @@ if (!connectionString) {
   });
 
   pool.on('error', (error) => {
-    console.error('Erro inesperado no pool PostgreSQL:', error.message);
+    logger.error('database_pool_error', safeErrorLogFields(error));
   });
 
   module.exports = pool;
 }
+
+module.exports.buildSslConfig = buildSslConfig;
+module.exports.buildConnectionString = buildConnectionString;
+module.exports.normalizeProductionDatabaseUrl = normalizeProductionDatabaseUrl;

@@ -1,4 +1,5 @@
 const MatrizModel = require('../models/MatrizModel');
+const { logSafeError } = require('../utils/safeError');
 
 class MatrizController {
   static async findAll(req, res) {
@@ -6,7 +7,7 @@ class MatrizController {
       const dados = await MatrizModel.findAll();
       return res.status(200).json(dados);
     } catch (error) {
-      console.error("Erro ao buscar matrizes:", error);
+      logSafeError('matrix_list_failed', error, { request_id: req.requestId || null });
       return res.status(500).json({ error: 'Erro interno ao buscar matrizes' });
     }
   }

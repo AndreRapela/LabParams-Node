@@ -2,7 +2,7 @@ const pool = require('../config/database');
 const AuditLogModel = require('./AuditLogModel');
 const AmostraModel = require('./AmostraModel');
 const AssinaturaEletronicaModel = require('./AssinaturaEletronicaModel');
-const { avaliarConformidade } = require('../utils/conformidade');
+const { avaliarConformidade, avaliarStatusOperacional } = require('../utils/conformidade');
 const {
   RESULTADO_STATUS,
   assertResultadoTransition,
@@ -249,11 +249,20 @@ class ResultadoAnaliseModel {
   }
 
   static buildAnalyticalSnapshot({ version, values, collectedAt, sample, parameter, method }) {
+    const statusOperacional = avaliarStatusOperacional({
+      valor_medido: values.valor_medido,
+      valor_qualitativo: values.valor_qualitativo,
+      limite_minimo: parameter.limite_minimo,
+      limite_maximo: parameter.limite_maximo,
+      tipo_limite: parameter.tipo_limite,
+    });
+
     return {
       schema_version: 1,
       versao_resultado: Number(version),
       valor_medido: values.valor_medido,
       valor_qualitativo: values.valor_qualitativo,
+      status_operacional: statusOperacional,
       datacoleta: collectedAt,
       parametro: {
         id: parameter.id,

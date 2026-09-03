@@ -4,7 +4,7 @@ API REST do SYSmLab, um sistema de gestão laboratorial voltado ao fluxo de clie
 
 ## O que está implementado
 
-- Node.js 20–24, Express 4 e PostgreSQL/Supabase.
+- Node.js 22–24, Express 4 e PostgreSQL/Supabase.
 - Autenticação Supabase; JWT validado por JWKS e autorização no servidor para `Gestor`, `Analista` e `Usuário`.
 - Clientes, solicitantes e pedidos de análise com prioridade, prazo e ciclo de vida controlado.
 - Amostras vinculadas a pedido, parâmetros aplicáveis e cadeia de custódia append-only.
@@ -23,7 +23,7 @@ O produto apoia controles relevantes da ISO/IEC 17025, mas **não concede certif
 
 ## Instalação local
 
-Pré-requisitos: Node.js 20 ou superior, npm e um banco PostgreSQL compatível com as migrações.
+Pré-requisitos: Node.js 22, 23 ou 24, npm e um banco PostgreSQL compatível com as migrações.
 
 ```powershell
 npm ci
@@ -107,9 +107,11 @@ O contrato detalhado, com payloads, filtros, workflows e respostas, está em [op
 npm test
 npm audit --omit=dev
 node --check index.js
+node scripts/check-migrations.js
+node scripts/check-supabase-config.js
 ```
 
-O pipeline em `.github/workflows/ci.yml` executa testes e auditoria de dependências de produção. Uma aprovação de pipeline não substitui homologação com dados representativos nem UAT do laboratório.
+Antes de publicar, execute também `node scripts/check-production-env.js` com as variáveis reais de produção e `node scripts/verify-database.js` contra o ambiente de destino. Os erros são categorizados sem imprimir senha, chave, host ou URL de conexão. O pipeline em `.github/workflows/ci.yml` executa testes, auditoria de dependências, valida as migrations e impede a reescrita ou inserção retroativa do histórico tanto em pull requests quanto em pushes para `main`. Uma aprovação de pipeline não substitui homologação com dados representativos nem UAT do laboratório.
 
 ## Documentação
 

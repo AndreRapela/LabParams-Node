@@ -1,6 +1,7 @@
 const Model=require('../models/MetodoAnaliticoModel');
+const {logSafeError}=require('../utils/safeError');
 function audit(req){return{actorUserId:req.user?.id,requestId:req.requestId};}
-function fail(res,e){const s=Number(e.statusCode)||500;if(s>=500)console.error('Erro em métodos:',e);return res.status(s).json({success:false,message:s<500?e.message:'Erro interno ao processar método',code:e.code});}
+function fail(res,e){const s=Number(e.statusCode)||500;if(s>=500)logSafeError('analytical_method_controller_failed',e,{request_id:res.getHeader('X-Request-Id')||null});return res.status(s).json({success:false,message:s<500?e.message:'Erro interno ao processar método',code:e.code});}
 function list(res,r){if(Array.isArray(r))return res.json({success:true,data:r,count:r.length});return res.json({success:true,data:r.rows,count:r.rows.length,pagination:{page:r.page,page_size:r.pageSize,total:r.total,total_pages:Math.ceil(r.total/r.pageSize)}});}
 class MetodoAnaliticoController{
  static async findAll(req,res){try{return list(res,await Model.findAll(req.query));}catch(e){return fail(res,e);}}

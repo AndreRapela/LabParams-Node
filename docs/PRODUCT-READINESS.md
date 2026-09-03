@@ -44,6 +44,17 @@ Todas devem ser verificadas e evidenciadas:
 6. **Segurança:** auditoria de dependências sem vulnerabilidade de produção conhecida, revisão independente/pentest proporcionais ao risco.
 7. **Contrato:** escopo, limites, SLA, responsabilidades pelo catálogo/métodos, LGPD e processo de aceite formalizados.
 
+## Gates técnicos disponíveis
+
+O repositório entrega quatro verificações reproduzíveis para a liberação:
+
+- `node scripts/check-migrations.js`: análise léxica, integridade estática, política destrutiva e controles mínimos de segurança das migrations;
+- `node scripts/check-supabase-config.js`: padrões seguros de cadastro, senha e TOTP no arquivo de configuração;
+- `node scripts/check-production-env.js`: pré-flight seguro das variáveis de produção, sem revelar seus valores;
+- `node scripts/verify-database.js`: comparação transacional somente leitura entre histórico/conteúdo disponível, semântica do esquema remoto, drift, privilégios, TLS e invariantes críticos.
+
+O CI executa a validação estática e impede alteração/remoção ou timestamp retroativo de migrations em pull requests e pushes para `main`. Esses gates reduzem erro de implantação, mas não comprovam backup restaurável, UAT, pentest, configuração remota do Supabase ou aprovação do responsável técnico; as evidências devem ser anexadas ao registro de release.
+
 ## Limitações que precisam constar na proposta
 
 - implantação segregada por laboratório; não é SaaS multi-tenant;

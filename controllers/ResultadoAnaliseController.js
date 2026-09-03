@@ -1,12 +1,18 @@
 const ResultadoAnaliseModel = require('../models/ResultadoAnaliseModel');
 const SignatureService = require('../services/SignatureService');
+const { logSafeError } = require('../utils/safeError');
 
 function sendError(res, error, fallback) {
   const status = Number(error.statusCode) || 500;
   if (['REAUTENTICACAO_FALHOU', 'REAUTENTICACAO_OBRIGATORIA'].includes(error.code)) {
     res.locals.signatureVerificationFailed = true;
   }
-  if (status >= 500) console.error(fallback, error);
+  if (status >= 500) {
+    logSafeError('result_controller_failed', error, {
+      request_id: res.getHeader('X-Request-Id') || null,
+      operation: fallback,
+    });
+  }
   return res.status(status).json({
     success: false,
     message: status < 500 ? error.message : fallback,

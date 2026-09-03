@@ -2,6 +2,8 @@ const QRCode = require('qrcode');
 const LaudoModel = require('../models/LaudoModel');
 const SignatureService = require('../services/SignatureService');
 const { renderLaudoHtml } = require('../utils/laudoHtml');
+const { resolveReportConfiguration } = require('../utils/laudoConfiguration');
+const { logSafeError } = require('../utils/safeError');
 
 function auditContext(req) {
   return {
@@ -17,7 +19,9 @@ function sendError(req, res, error) {
   if (['REAUTENTICACAO_FALHOU', 'REAUTENTICACAO_OBRIGATORIA'].includes(error.code)) {
     res.locals.signatureVerificationFailed = true;
   }
-  if (status >= 500) console.error('Erro em laudos:', error);
+  if (status >= 500) {
+    logSafeError('report_controller_failed', error, { request_id: req.requestId || null });
+  }
   return res.status(status).json({
     success: false,
     message: status < 500 ? error.message : 'Erro interno ao processar laudo',
@@ -117,8 +121,9 @@ class LaudoController {
         });
       }
 
-      const publicAppUrl = String(process.env.PUBLIC_APP_URL || 'http://localhost:4200')
-        .replace(/\/$/, '');
+      const { publicAppUrl } = resolveReportConfiguration({
+        laboratory: data.snapshot?.laboratorio,
+      });
       const verificationUrl = `${publicAppUrl}/verificar-laudo/${data.conteudo_hash}`;
       const verificationQr = await QRCode.toDataURL(verificationUrl, {
         errorCorrectionLevel: 'M',

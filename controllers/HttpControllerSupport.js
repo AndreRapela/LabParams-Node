@@ -1,3 +1,5 @@
+const { logSafeError } = require('../utils/safeError');
+
 function auditContext(req, reason) {
   return {
     actorUserId: req.user?.id,
@@ -34,7 +36,10 @@ function sendError(req, res, error, fallbackMessage) {
     message = 'Os dados informados não atendem às regras de validação.';
   }
   if (status >= 500) {
-    console.error(`[${req.requestId || 'sem-request-id'}] ${fallbackMessage}:`, error);
+    logSafeError('http_controller_failed', error, {
+      request_id: req.requestId || null,
+      operation: fallbackMessage,
+    });
   }
   return res.status(status).json({
     success: false,

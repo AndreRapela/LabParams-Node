@@ -1,9 +1,14 @@
 const ClienteModel = require('../models/ClienteModel');
+const { logSafeError } = require('../utils/safeError');
 
 function audit(req) { return { actorUserId: req.user?.id, requestId: req.requestId }; }
 function fail(res, error) {
   const status = Number(error.statusCode) || 500;
-  if (status >= 500) console.error('Erro em clientes:', error);
+  if (status >= 500) {
+    logSafeError('customer_controller_failed', error, {
+      request_id: res.getHeader('X-Request-Id') || null,
+    });
+  }
   return res.status(status).json({ success: false, message: status < 500 ? error.message : 'Erro interno ao processar cliente', code: error.code });
 }
 function sendList(res, result) {

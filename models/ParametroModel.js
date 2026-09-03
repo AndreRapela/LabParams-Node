@@ -33,7 +33,10 @@ class ParametroModel {
       ? null
       : Number(dados.valor_parametro);
     if (valor !== null && (!Number.isFinite(valor) || valor < 0)) {
-      throw new Error('Valor atual inválido');
+      const error = new Error('Valor atual inválido');
+      error.statusCode = 400;
+      error.code = 'INVALID_PARAMETER_VALUE';
+      throw error;
     }
 
     const client = await pool.connect();
@@ -73,11 +76,58 @@ class ParametroModel {
     }
   }
 
-  static async findAllGerenciamento() {
-    const result = await pool.query(`${SELECT_CATALOGO}
-      order by l.sigla, lc.ordem, p.categoria, p.nome
-    `);
-    return result.rows;
+  static async findAllGerenciamento(options = {}) {
+    const page = Number(options.page ?? 1);
+    const pageSize = Number(options.pageSize ?? 30);
+    const offset = Number(options.offset ?? ((page - 1) * pageSize));
+    const values = [];
+    const filters = [];
+
+    if (options.matriz_id) {
+      values.push(options.matriz_id);
+      filters.push(`p.matriz_id = $${values.length}`);
+    }
+    if (options.legislacao_id) {
+      values.push(options.legislacao_id);
+      filters.push(`p.legislacao_id = $${values.length}`);
+    }
+    if (options.q) {
+      const normalizedSearch = String(options.q)
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+      values.push(`%${normalizedSearch}%`);
+      const accentSource = 'áàãâäéèêëíìîïóòõôöúùûüç';
+      const accentTarget = 'aaaaaeeeeiiiiooooouuuuc';
+      filters.push(`translate(lower(concat_ws(' ',
+        p.nome, p.categoria, m.nome, l.nome, l.sigla, lc.nome, lc.codigo
+      )), '${accentSource}', '${accentTarget}') like $${values.length}`);
+    }
+
+    const extraWhere = filters.length ? ` and ${filters.join(' and ')}` : '';
+    const countValues = [...values];
+    values.push(pageSize, offset);
+    const [countResult, pageResult] = await Promise.all([
+      pool.query(`
+        select count(*)::int as total
+        from parametro p
+        join matriz m on p.matriz_id = m.id
+        join legislacao l on p.legislacao_id = l.id
+        join legislacao_contexto lc on p.contexto_legislacao_id = lc.id
+        where p.ativo = true and lc.ativo = true${extraWhere}
+      `, countValues),
+      pool.query(`${SELECT_CATALOGO}${extraWhere}
+        order by l.sigla, lc.ordem, p.categoria, p.nome, p.id
+        limit $${values.length - 1} offset $${values.length}
+      `, values),
+    ]);
+
+    return {
+      rows: pageResult.rows,
+      total: Number(countResult.rows[0]?.total ?? 0),
+      page,
+      pageSize,
+    };
   }
 
   static async updateGerenciamento(id, dados, auditContext = {}) {

@@ -81,6 +81,26 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /acesso-atual:
+    get:
+      tags: [Usuários]
+      summary: Consulta o acesso da própria conta autenticada
+      description: >-
+        Usa exclusivamente o subject do JWT; não aceita ID de outro usuário e
+        não exige perfil/aprovação prévios. Permite exibir conta pendente antes
+        de navegar para áreas protegidas.
+      responses:
+        '200':
+          description: Estado do cadastro e da aprovação da própria conta.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CurrentAccessResponse' }
+        '404':
+          description: JWT válido sem cadastro local correspondente.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CurrentAccessResponse' }
+
   /clientes:
     get:
       tags: [Clientes]
@@ -1096,9 +1116,25 @@ paths:
     get:
       tags: [Catálogos]
       summary: Carrega parâmetros, matrizes e legislações para administração
-      description: Requer Gestor.
+      description: Requer Gestor; filtros são aplicados antes do COUNT e da página.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - in: query
+          name: page_size
+          schema: { type: integer, minimum: 1, maximum: 100, default: 30 }
+        - in: query
+          name: q
+          description: Busca sem diferenciar acentos; máximo de 100 caracteres.
+          schema: { type: string, maxLength: 100 }
+        - { in: query, name: matriz_id, schema: { type: integer, minimum: 1 } }
+        - { in: query, name: legislacao_id, schema: { type: integer, minimum: 1 } }
       responses:
-        '200': { $ref: '#/components/responses/AnyJson' }
+        '200':
+          description: Página de parâmetros e catálogos completos para os filtros.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ParameterManagementResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
   /gerenciamento-parametros/{id}:
     put:
@@ -1125,8 +1161,14 @@ paths:
     get:
       tags: [Monitoramento]
       summary: Dashboard web
-      description: Considera somente resultados publicados.
+      description: >-
+        Considera somente resultados publicados. Filtros e status são aplicados
+        antes da paginação; statistics representa todo o conjunto filtrado.
       parameters:
+        - $ref: '#/components/parameters/Page'
+        - in: query
+          name: page_size
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
         - { in: query, name: matriz_id, schema: { type: integer } }
         - { in: query, name: legislacao_id, schema: { type: integer } }
         - { in: query, name: amostra_numero, schema: { type: string } }
@@ -1135,7 +1177,12 @@ paths:
         - { in: query, name: data_publicacao, schema: { type: string, format: date } }
         - { in: query, name: status, description: Status separados por vírgula, schema: { type: string } }
       responses:
-        '200': { $ref: '#/components/responses/Success' }
+        '200':
+          description: Página do dashboard e estatísticas globais dos filtros.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
   /dashboard-web/filter-options:
     get:
@@ -1148,7 +1195,9 @@ paths:
     get:
       tags: [Monitoramento]
       summary: Dashboard de TV
-      description: Considera somente resultados publicados.
+      description: >-
+        Snapshot atual que considera somente o resultado publicado mais recente
+        de cada parâmetro, com desempate por publicação, criação e ID.
       parameters:
         - { in: query, name: parametro_id, description: IDs separados por vírgula, schema: { type: string } }
       responses:
@@ -1165,9 +1214,37 @@ paths:
     get:
       tags: [Monitoramento]
       summary: Alertas de resultados publicados
-      description: Requer Analista ou Gestor.
+      description: >-
+        Requer Analista ou Gestor. A classificação usa alerta para valor ainda
+        dentro do limite e próximo à borda, nao-conforme para extrapolação comum
+        e critico para extrapolação superior à margem de 20%. Filtros e status
+        são aplicados antes da paginação; stats representa o conjunto filtrado.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - in: query
+          name: page_size
+          schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+        - in: query
+          name: q
+          description: Busca por parâmetro, matriz, contexto ou amostra.
+          schema: { type: string, maxLength: 100 }
+        - in: query
+          name: search
+          description: Alias legado de q; q tem precedência quando ambos são enviados.
+          schema: { type: string, maxLength: 100 }
+        - in: query
+          name: status
+          description: Slugs separados por vírgula.
+          schema:
+            type: string
+            example: alerta,nao-conforme,critico
       responses:
-        '200': { $ref: '#/components/responses/Success' }
+        '200':
+          description: Página de alertas e totais globais dos filtros.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AlertResponse' }
+        '400': { $ref: '#/components/responses/BadRequest' }
 
   /usuarios:
     get:
@@ -1179,7 +1256,7 @@ paths:
     post:
       tags: [Usuários]
       summary: Cria usuário no Auth e cadastro local
-      description: Requer Gestor.
+      description: Requer Gestor; a conta administrativa é criada explicitamente aprovada.
       requestBody:
         $ref: '#/components/requestBodies/User'
       responses:
@@ -1205,6 +1282,30 @@ paths:
                 perfil: { $ref: '#/components/schemas/Role' }
       responses:
         '200': { $ref: '#/components/responses/Success' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /usuarios/{userId}/aprovacao:
+    put:
+      tags: [Usuários]
+      summary: Aprova ou bloqueia o acesso de um usuário
+      description: >-
+        Requer Gestor. Impede auto-bloqueio e bloqueio do último Gestor aprovado;
+        a garantia também é aplicada atomicamente no banco.
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [acesso_aprovado]
+              properties:
+                acesso_aprovado: { type: boolean }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
 
   /auditoria:
@@ -1569,6 +1670,116 @@ components:
             - { type: number }
             - { type: boolean }
         count: { type: integer, minimum: 0 }
+    Pagination100:
+      type: object
+      required: [page, page_size, total, total_pages, has_next, has_previous]
+      properties:
+        page: { type: integer, minimum: 1 }
+        page_size: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, minimum: 0 }
+        total_pages: { type: integer, minimum: 0 }
+        has_next: { type: boolean }
+        has_previous: { type: boolean }
+    DashboardStatistics:
+      type: object
+      required:
+        - compliant_count
+        - alert_count
+        - critical_count
+        - non_compliant_count
+        - informative_count
+        - total_parameters
+      properties:
+        compliant_count: { type: integer, minimum: 0 }
+        alert_count: { type: integer, minimum: 0 }
+        critical_count: { type: integer, minimum: 0 }
+        non_compliant_count: { type: integer, minimum: 0 }
+        informative_count: { type: integer, minimum: 0 }
+        total_parameters: { type: integer, minimum: 0 }
+    DashboardResponse:
+      type: object
+      required: [success, data, statistics, pagination]
+      properties:
+        success: { type: boolean, example: true }
+        data:
+          type: array
+          items: { type: object, additionalProperties: true }
+        statistics: { $ref: '#/components/schemas/DashboardStatistics' }
+        statistics_scope: { type: string, enum: [filtered_results] }
+        pagination: { $ref: '#/components/schemas/Pagination100' }
+        last_updated: { type: string, format: date-time }
+        filters_applied: { type: object, additionalProperties: true }
+        message: { type: string }
+    AlertStatistics:
+      type: object
+      required: [total, alerta, naoConforme, critico]
+      properties:
+        total: { type: integer, minimum: 0 }
+        alerta: { type: integer, minimum: 0 }
+        naoConforme: { type: integer, minimum: 0 }
+        critico: { type: integer, minimum: 0 }
+    AlertResponse:
+      type: object
+      required: [success, data, stats, pagination]
+      properties:
+        success: { type: boolean, example: true }
+        data:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              status:
+                type: string
+                enum: [ALERTA, NÃO CONFORME, CRÍTICO]
+              status_code:
+                type: string
+                enum: [alerta, nao-conforme, critico]
+        stats: { $ref: '#/components/schemas/AlertStatistics' }
+        stats_scope: { type: string, enum: [filtered_results] }
+        pagination: { $ref: '#/components/schemas/Pagination100' }
+        filters_applied: { type: object, additionalProperties: true }
+    CurrentAccessResponse:
+      type: object
+      required: [success, data]
+      properties:
+        success: { type: boolean }
+        code: { type: string }
+        message: { type: string }
+        request_id: { type: string }
+        data:
+          type: object
+          required:
+            - cadastrado
+            - perfil
+            - acesso_aprovado
+            - schema_ready
+            - status_acesso
+          properties:
+            cadastrado: { type: boolean }
+            perfil:
+              type: string
+              nullable: true
+              enum: [Gestor, Analista, Usuário]
+            acesso_aprovado: { type: boolean, nullable: true }
+            schema_ready: { type: boolean }
+            status_acesso:
+              type: string
+              enum: [aprovado, pendente, nao-cadastrado, migracao-pendente]
+    ParameterManagementResponse:
+      type: object
+      required: [parametros, matrizes, legislacoes, pagination]
+      properties:
+        parametros:
+          type: array
+          items: { type: object, additionalProperties: true }
+        matrizes:
+          type: array
+          items: { type: object, additionalProperties: true }
+        legislacoes:
+          type: array
+          items: { type: object, additionalProperties: true }
+        pagination: { $ref: '#/components/schemas/Pagination100' }
     PaginatedResponse:
       type: object
       required: [success, data]
@@ -2044,5 +2255,10 @@ components:
         nome: { type: string, minLength: 2 }
         email: { type: string, format: email }
         telefone: { type: string, nullable: true }
-        senha: { type: string, format: password, minLength: 8, writeOnly: true }
+        senha:
+          type: string
+          format: password
+          minLength: 12
+          writeOnly: true
+          description: Exige maiúscula, minúscula, número e símbolo.
         perfil: { $ref: '#/components/schemas/Role' }

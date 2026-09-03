@@ -12,6 +12,8 @@ Este diretório é a fonte de verdade do esquema PostgreSQL. As migrações deve
 | `20260730010000_pilot_workflow.sql` | Clientes, pedidos, métodos, custódia, snapshots/versionamento de resultados, workflow assinado e laudos imutáveis |
 | `20260730020000_quality_operations.sql` | Insumos/lotes/movimentações, equipamentos/calibração/manutenção/utilização e QMS/CAPA |
 | `20260730030000_operational_hardening.sql` | Contador PostgreSQL compartilhado do limite de falhas de reautenticação, armazenado somente como SHA-256 |
+| `20260811010000_secure_defaults_and_dashboard_indexes.sql` | Privilégios padrão seguros para novos objetos e índices parciais dos dashboards publicados |
+| `20260811020000_access_approval_and_operational_status.sql` | Aprovação explícita de acesso, proteção concorrente do último Gestor e status operacional indexável dos resultados |
 
 `seed.sql` contém matrizes e legislações iniciais. Revise o seed antes de usar `--include-seed` fora de um banco novo ou de homologação.
 
@@ -66,6 +68,22 @@ Depois da aplicação, verifique ao menos:
 - triggers append-only e de integridade de assinatura/laudo;
 - RLS e revogações para `anon`/`authenticated`;
 - fluxo completo em homologação, incluindo restauração de backup.
+
+Use os verificadores do repositório antes e depois da aplicação:
+
+```powershell
+node scripts/check-migrations.js
+node scripts/check-supabase-config.js
+node scripts/verify-database.js
+```
+
+O terceiro comando usa a configuração de banco do `.env`, abre uma transação somente leitura e falha se houver migration pendente/desconhecida ou adulterada, objeto inesperado/ausente, trigger/função/índice divergente, RLS/privilégio inseguro, conexão sem TLS ou violação dos invariantes consultados. Não altere uma migration depois que sua versão aparecer em `supabase_migrations.schema_migrations`; crie outro arquivo incremental com timestamp posterior.
+
+Os três índices de `20260811010000_secure_defaults_and_dashboard_indexes.sql` usam `CREATE INDEX CONCURRENTLY` e, por exigência do PostgreSQL, essa migration é deliberadamente não transacional. Antes e depois da criação, blocos somente leitura validam tabela, método, unicidade, chaves, ordem, predicado e o estado `valid/ready`; assim, `IF NOT EXISTS` não consegue esconder um índice homônimo incorreto. O gate estático só admite essa exceção estreita e reprova mistura com DML ou DDL destrutivo.
+
+Aplique essa migration primeiro em homologação com a mesma versão do executor que será usada em produção. A criação concorrente reduz bloqueios de escrita, mas ainda consome I/O/CPU e pode demorar. Se uma execução interrompida deixar índice inválido, os checks falharão: inspecione `pg_index`, registre a evidência e siga um procedimento de recuperação aprovado antes de tentar novamente; não remova índices automaticamente no deploy.
+
+O `config.toml` desativa signup público e define uma política de senha mais forte para desenvolvimento/configuração controlada. Essas opções não provam o estado do projeto hospedado: confira e evidencie Auth, MFA, redirects, SSL enforcement e restrições de rede diretamente no ambiente remoto.
 
 ## Credenciais
 

@@ -4,6 +4,7 @@ const ImportacaoModel = require('../models/ImportacaoModel');
 const fs = require('fs');
 const path = require('path');
 const readXlsxFile = require('read-excel-file/node');
+const readXlsxSheet = readXlsxFile.readSheet || readXlsxFile;
 
 // Mocks
 jest.mock('../models/ImportacaoModel');
@@ -286,8 +287,15 @@ describe('ImportacaoController', () => {
 
   describe('processamento de arquivos Excel', () => {
 
+    beforeEach(() => {
+      if (!jest.isMockFunction(ImportacaoController.validarArquivoXlsx)) {
+        jest.spyOn(ImportacaoController, 'validarArquivoXlsx');
+      }
+      ImportacaoController.validarArquivoXlsx.mockResolvedValue();
+    });
+
     test('deve ler XLSX, normalizar cabeçalhos e converter datas', async () => {
-      readXlsxFile.mockResolvedValue([
+      readXlsxSheet.mockResolvedValue([
         [' DataColeta ', 'VALOR_MEDIDO', 'observacao'],
         [new Date('2024-12-01T00:00:00.000Z'), 0.5, ' ok '],
         [null, null, null],
@@ -303,13 +311,13 @@ describe('ImportacaoController', () => {
     });
 
     test('deve rejeitar XLSX sem cabeçalhos', async () => {
-      readXlsxFile.mockResolvedValue([[null, null], ['valor', 1]]);
+      readXlsxSheet.mockResolvedValue([[null, null], ['valor', 1]]);
       await expect(ImportacaoController.lerExcel('/tmp/arquivo.xlsx'))
         .rejects.toThrow('A primeira linha deve conter os cabeçalhos');
     });
 
     test('deve retornar vazio para XLSX sem linhas', async () => {
-      readXlsxFile.mockResolvedValue([]);
+      readXlsxSheet.mockResolvedValue([]);
       await expect(ImportacaoController.lerExcel('/tmp/vazio.xlsx')).resolves.toEqual([]);
     });
     
@@ -364,6 +372,23 @@ describe('ImportacaoController', () => {
           success: true
         })
       );
+    });
+
+    test('deve rejeitar XLSX suspeito com resposta 400 sem expor detalhes internos', async () => {
+      req.file = { path: '/tmp/suspeito.xlsx', originalname: 'suspeito.xlsx' };
+      const error = new Error('detalhe estrutural sensível');
+      error.code = 'XLSX_SECURITY_LIMIT';
+      jest.spyOn(ImportacaoController, 'lerExcel').mockRejectedValue(error);
+      fs.promises = { unlink: jest.fn().mockResolvedValue() };
+
+      await ImportacaoController.importarResultadosAnalise(req, res);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({
+        success: false,
+        message: expect.stringMatching(/XLSX.*limites de segurança/i),
+      }));
+      expect(JSON.stringify(res.json.mock.calls[0][0])).not.toContain('detalhe estrutural');
     });
 
     test('deve rejeitar o formato XLS legado', async () => {

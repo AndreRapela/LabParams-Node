@@ -4,6 +4,7 @@ const AuditLogModel = require('./AuditLogModel');
 const AssinaturaEletronicaModel = require('./AssinaturaEletronicaModel');
 const { avaliarConformidade } = require('../utils/conformidade');
 const { canonicalStringify } = require('../utils/canonicalJson');
+const { resolveReportConfiguration } = require('../utils/laudoConfiguration');
 const { parsePagination, workflowError } = require('../utils/workflowPiloto');
 
 function safeText(value, max = 5_000) {
@@ -204,6 +205,7 @@ class LaudoModel {
     const observations = safeText(input.observacoes);
     const revisionReason = safeText(input.motivo ?? input.motivo_revisao, 2_000);
     const laboratory = labSnapshot();
+    resolveReportConfiguration({ laboratory });
     const client = await pool.connect();
 
     try {

@@ -1,8 +1,13 @@
 const AmostraModel = require('../models/AmostraModel');
+const { logSafeError } = require('../utils/safeError');
 
 function sendError(res, error, fallback) {
   const status = Number(error.statusCode) || 500;
-  if (status >= 500) console.error(fallback, error);
+  if (status >= 500) {
+    logSafeError('sample_controller_failed', error, {
+      request_id: res.getHeader('X-Request-Id') || null,
+    });
+  }
   return res.status(status).json({
     success: false,
     message: status < 500 ? error.message : fallback,

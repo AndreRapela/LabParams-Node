@@ -8,6 +8,13 @@ const os = require('os');
 const { randomUUID } = require('crypto');
 const ImportacaoController = require('../controllers/ImportacaoController');
 const roleFromTable = require('../middleware/RoleFromTable');
+const { logSafeError } = require('../utils/safeError');
+
+function fileValidationError(code) {
+  const error = new Error('Arquivo recusado pela política de upload.');
+  error.code = code;
+  return error;
+}
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -63,7 +70,7 @@ const upload = multer({
     
     // Verifica extensão (prioridade na validação)
     if (!extensoesPermitidas.includes(ext)) {
-      return cb(new Error('Apenas arquivos CSV e XLSX são permitidos'));
+      return cb(fileValidationError('UPLOAD_EXTENSION_INVALID'));
     }
     
     // Verifica MIME type apenas se não for octet-stream genérico
@@ -71,7 +78,7 @@ const upload = multer({
     if (file.mimetype && 
         file.mimetype !== 'application/octet-stream' && 
         !mimeTypesPermitidos.includes(file.mimetype)) {
-      return cb(new Error(`Tipo de arquivo inválido: ${file.mimetype}. Apenas CSV e XLSX são permitidos`));
+      return cb(fileValidationError('UPLOAD_MIME_INVALID'));
     }
     
     cb(null, true);
@@ -97,31 +104,59 @@ router.get(
   ImportacaoController.baixarTemplate
 );
 
-router.use((error, req, res, next) => {
+function uploadErrorHandler(error, req, res, next) {
   if (error instanceof multer.MulterError) {
     if (error.code === 'LIMIT_FILE_SIZE') {
       return res.status(400).json({
         success: false,
         message: 'Arquivo muito grande',
-        error: 'O arquivo deve ter no máximo 10 MB'
+        error: 'O arquivo deve ter no máximo 10 MB',
+        code: 'UPLOAD_FILE_TOO_LARGE',
+        request_id: req.requestId,
       });
     }
+    logSafeError('analysis_import_multer_failed', error, {
+      request_id: req.requestId || null,
+    });
     return res.status(400).json({
       success: false,
-      message: 'Erro no upload',
-      error: error.message
+      message: 'Upload inválido',
+      error: 'Verifique o campo e envie um único arquivo CSV ou XLSX.',
+      code: 'UPLOAD_INVALID',
+      request_id: req.requestId,
     });
   }
-  
+
+  const validationMessages = {
+    UPLOAD_EXTENSION_INVALID: 'Apenas arquivos CSV e XLSX são permitidos.',
+    UPLOAD_MIME_INVALID: 'O tipo do arquivo não corresponde a CSV ou XLSX.',
+  };
+  if (validationMessages[error?.code]) {
+    return res.status(400).json({
+      success: false,
+      message: 'Arquivo recusado',
+      error: validationMessages[error.code],
+      code: error.code,
+      request_id: req.requestId,
+    });
+  }
+
   if (error) {
-    return res.status(400).json({
+    logSafeError('analysis_import_upload_failed', error, {
+      request_id: req.requestId || null,
+    });
+    return res.status(500).json({
       success: false,
-      message: 'Erro ao processar arquivo',
-      error: error.message
+      message: 'Não foi possível receber o arquivo',
+      code: 'UPLOAD_FAILED',
+      request_id: req.requestId,
     });
   }
-  
-  next();
-});
+
+  return next();
+}
+
+router.use(uploadErrorHandler);
 
 module.exports = router;
+module.exports.uploadErrorHandler = uploadErrorHandler;
